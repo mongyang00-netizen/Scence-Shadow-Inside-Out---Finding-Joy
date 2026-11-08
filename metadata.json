@@ -1,0 +1,6 @@
+{
+  "name": "Scene Shadow: Inside Out — Finding Joy",
+  "description": "A movie-clip English shadowing application for Korean high school learners featuring Inside Out with segmented YouTube playback, voice recording, step-by-step guidance, and self-evaluation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
