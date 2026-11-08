@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Sentence, SentenceProgress, Rating } from '../types';
 import { YouTubePlayer, YouTubePlayerHandle } from './YouTubePlayer';
 import { SHADOWING_STEPS, SELF_CHECK_QUESTIONS } from '../constants';
+import { audioDiagnostics } from '../utils/audioDiagnostics';
 import {
   ChevronLeft,
   ChevronRight,
@@ -17,7 +18,6 @@ import {
   Sparkles,
   ArrowLeft,
   AlertCircle,
-  HelpCircle,
   RotateCcw,
   ExternalLink
 } from 'lucide-react';
@@ -69,6 +69,8 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const recordingStopTimeoutRef = useRef<number | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
+  const recordingSessionIdRef = useRef<number>(0);
+  const isStartingRecordingRef = useRef<boolean>(false);
 
   // Web Speech recognition state
   const [isListeningSpeech, setIsListeningSpeech] = useState<boolean>(false);
@@ -85,6 +87,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   // Clean up any active audio tracks on unmount
   useEffect(() => {
     return () => {
+      recordingSessionIdRef.current += 1;
       if (activeStreamRef.current) {
         activeStreamRef.current.getTracks().forEach((track) => track.stop());
         activeStreamRef.current = null;
@@ -94,7 +97,10 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
   // Reset recording/text state, clear timers/loops, and cue player on sentence change
   useEffect(() => {
+    audioDiagnostics.log('SYS', `Switched to Sentence #${sentence.id} ("${sentence.text.substring(0, 30)}...")`);
     // 1. If currently recording or playing voice, stop immediately and safely release mic
+    recordingSessionIdRef.current += 1;
+    isStartingRecordingRef.current = false;
     if (recordingStopTimeoutRef.current) {
       window.clearTimeout(recordingStopTimeoutRef.current);
       recordingStopTimeoutRef.current = null;
@@ -104,8 +110,12 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         mediaRecorderRef.current.stop();
       } catch (e) {}
     }
+    mediaRecorderRef.current = null;
+
     if (activeStreamRef.current) {
-      activeStreamRef.current.getTracks().forEach((track) => track.stop());
+      try {
+        activeStreamRef.current.getTracks().forEach((track) => track.stop());
+      } catch (e) {}
       activeStreamRef.current = null;
     }
 
@@ -151,9 +161,11 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     if (!playerRef.current) return;
 
     if (isPlayingClip) {
+      audioDiagnostics.log('YT', 'handlePlayOriginal: User clicked Pause');
       playerRef.current.pause();
       setIsPlayingClip(false);
     } else {
+      audioDiagnostics.log('YT', `handlePlayOriginal: User clicked Play original (${sentence.start}s - ${sentence.end}s)`);
       setIsPlayingClip(true);
       playerRef.current.playSegment(sentence.start, sentence.end, () => {
         setIsPlayingClip(false);
@@ -175,59 +187,166 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
   // Toggle Loop
   const handleToggleLoop = () => {
-    setIsLooping((prev) => !prev);
+    setIsLooping((prev) => {
+      audioDiagnostics.log('YT', `Loop toggled to ${!prev ? 'ON' : 'OFF'}`);
+      return !prev;
+    });
   };
 
-  // Start simultaneous Recording + Clip Playback immediately on button press
+  // Stop current recording process and invalidate previous session
+  const stopRecordingProcess = (reason: string = 'User request / reset') => {
+    recordingSessionIdRef.current += 1;
+    isStartingRecordingRef.current = false;
+
+    audioDiagnostics.log('REC', `stopRecordingProcess called: ${reason}`);
+
+    if (recordingStopTimeoutRef.current) {
+      window.clearTimeout(recordingStopTimeoutRef.current);
+      recordingStopTimeoutRef.current = null;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        audioDiagnostics.log('REC', `Error stopping MediaRecorder: ${e}`);
+      }
+    }
+    mediaRecorderRef.current = null;
+
+    if (activeStreamRef.current) {
+      try {
+        activeStreamRef.current.getTracks().forEach((track) => track.stop());
+      } catch (e) {
+        audioDiagnostics.log('MIC', `Error stopping MediaStream tracks: ${e}`);
+      }
+      activeStreamRef.current = null;
+    }
+
+    if (playerRef.current) {
+      playerRef.current.pause();
+      setIsPlayingClip(false);
+    }
+    setIsRecording(false);
+    audioDiagnostics.updateState({ recState: 'inactive' });
+  };
+
+  // Start simultaneous Recording + Clip Playback with session isolation
   const handleStartRecording = async () => {
-    if (isRecording) {
-      // Manual stop
-      stopRecordingProcess();
+    const attemptId = audioDiagnostics.incrementAttempt();
+    audioDiagnostics.log('REC', `[Attempt #${attemptId}] Record button clicked (isRecording=${isRecording}, isStarting=${isStartingRecordingRef.current})`);
+
+    if (isRecording || isStartingRecordingRef.current) {
+      // Manual stop or duplicate click handling
+      stopRecordingProcess(`[Attempt #${attemptId}] User clicked stop button`);
       return;
     }
 
+    // Completely reset any previous session before starting a new one
+    stopRecordingProcess(`[Attempt #${attemptId}] Clearing previous recording session before start`);
+
+    const currentSessionId = recordingSessionIdRef.current;
+    isStartingRecordingRef.current = true;
+
     try {
-      // 1. Freshly request microphone stream upon Record button press (no persistent or pre-warmed stream)
+      // 1. Microphone access requested & granted FIRST (before starting video)
+      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Requesting navigator.mediaDevices.getUserMedia({ audio: true })...`);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // If user clicked Stop or Record again while getUserMedia was pending, cancel this attempt
+      if (recordingSessionIdRef.current !== currentSessionId) {
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Session invalidated while getUserMedia was pending. Releasing stream.`);
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       activeStreamRef.current = stream;
       setMicPermissionDenied(false);
+
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioDiagnostics.updateState({
+          trackLabel: audioTrack.label,
+          trackMuted: audioTrack.muted,
+          trackReadyState: audioTrack.readyState,
+          trackEnabled: audioTrack.enabled
+        });
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] getUserMedia success: label="${audioTrack.label}", readyState="${audioTrack.readyState}", muted=${audioTrack.muted}, enabled=${audioTrack.enabled}`);
+
+        audioTrack.onmute = () => {
+          audioDiagnostics.updateState({ trackMuted: true });
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONMUTE event fired (Microphone muted by browser/OS)`);
+        };
+        audioTrack.onunmute = () => {
+          audioDiagnostics.updateState({ trackMuted: false });
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONUNMUTE event fired`);
+        };
+        audioTrack.onended = () => {
+          audioDiagnostics.updateState({ trackReadyState: 'ended' });
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONENDED event fired (Microphone stream closed)`);
+          if (recordingSessionIdRef.current === currentSessionId && mediaRecorderRef.current?.state === 'recording') {
+            try {
+              mediaRecorderRef.current.stop();
+            } catch (e) {}
+          }
+        };
+      } else {
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] WARNING: Stream returned no audio tracks!`);
+      }
 
       // Determine optimal audio mime type
       const mimeTypes = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm'];
       const supportedType = mimeTypes.find(
         (type) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)
       );
+      audioDiagnostics.log('REC', `[Attempt #${attemptId}] Selected MediaRecorder mimeType: "${supportedType || 'browser default'}"`);
       const recorderOptions: MediaRecorderOptions = supportedType ? { mimeType: supportedType } : {};
 
-      // 2. Create MediaRecorder
+      // 2. Create MediaRecorder instance
       const recorder = new MediaRecorder(stream, recorderOptions);
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
 
       recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
+        if (recordingSessionIdRef.current === currentSessionId && event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+          const totalBytes = audioChunksRef.current.reduce((acc, chunk) => acc + chunk.size, 0);
+          audioDiagnostics.updateState({
+            chunksCount: audioChunksRef.current.length,
+            totalBytes
+          });
+          if (audioChunksRef.current.length === 1 || audioChunksRef.current.length % 10 === 0) {
+            audioDiagnostics.log('REC', `[Attempt #${attemptId}] ondataavailable: chunk #${audioChunksRef.current.length} (${event.data.size} B), total=${totalBytes} B`);
+          }
         }
       };
 
       recorder.onerror = (errEvent: any) => {
         console.warn('MediaRecorder error:', errEvent);
-        setIsRecording(false);
-        if (activeStreamRef.current) {
-          activeStreamRef.current.getTracks().forEach((track) => track.stop());
-          activeStreamRef.current = null;
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onerror: ${errEvent?.error || errEvent?.name || errEvent}`);
+        if (recordingSessionIdRef.current === currentSessionId) {
+          stopRecordingProcess(`[Attempt #${attemptId}] MediaRecorder error`);
         }
       };
 
       recorder.onstop = () => {
-        setIsRecording(false);
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onstop event fired`);
+        if (recordingSessionIdRef.current !== currentSessionId) {
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Ignored onstop (session expired)`);
+          return;
+        }
 
-        // ALWAYS stop and release microphone stream tracks immediately when recording ends
+        setIsRecording(false);
+        isStartingRecordingRef.current = false;
+
+        // Release microphone stream tracks
         stream.getTracks().forEach((track) => track.stop());
         activeStreamRef.current = null;
 
-        // Only save recording and increment count if valid audio data was captured (> 200 bytes)
+        // Only save recording and increment count if valid audio data (> 200 bytes) was captured
         const totalBytes = audioChunksRef.current.reduce((acc, chunk) => acc + chunk.size, 0);
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] Recording finalized: Total captured bytes = ${totalBytes} B in ${audioChunksRef.current.length} chunks`);
+
         if (totalBytes > 200) {
           const audioBlob = new Blob(audioChunksRef.current, {
             type: supportedType || 'audio/webm'
@@ -238,94 +357,78 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
             [sentence.id]: url
           }));
 
-          // Update progress status: "done" if step 4, else "practiced"
           const nextStatus = currentStep === 4 ? 'done' : 'practiced';
           onUpdateProgress(sentence.id, {
             recordings: (progress?.recordings || 0) + 1,
             status: nextStatus
           });
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Recording saved successfully. Progress updated.`);
         } else {
-          console.warn('Recording yielded insufficient audio bytes on iOS/browser. Progress count preserved.');
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] WARNING: Recording yielded <200 bytes (${totalBytes} B). Recording discarded.`);
+          console.warn('Recording yielded insufficient audio bytes. Progress count preserved.');
         }
       };
 
-      // Handle track interruption on iOS (e.g. phone call or backgrounding)
-      const audioTrack = stream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.onended = () => {
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            try {
-              mediaRecorderRef.current.stop();
-            } catch (e) {}
-          }
-        };
-      }
-
-      // 3. Trigger video playback once recording has actively commenced
+      // 3. Trigger YouTube video segment playback ONLY AFTER microphone is confirmed & active
       let videoTriggered = false;
       const triggerVideoPlayback = () => {
-        if (videoTriggered) return;
+        if (videoTriggered || recordingSessionIdRef.current !== currentSessionId) return;
         videoTriggered = true;
+
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] Triggering YouTube video segment play (${sentence.start}s - ${sentence.end}s)...`);
 
         if (playerRef.current) {
           setIsPlayingClip(true);
-          // Loop is ignored during recording
+          // Always play segment starting cleanly from sentence.start
           playerRef.current.playSegment(sentence.start, sentence.end, () => {
+            if (recordingSessionIdRef.current !== currentSessionId) return;
+            audioDiagnostics.log('REC', `[Attempt #${attemptId}] Sentence segment playback finished. Scheduling recording stop in 1.0s...`);
             setIsPlayingClip(false);
 
             // PRD rule: Recording stops exactly 1.0 second after sentence ends
             recordingStopTimeoutRef.current = window.setTimeout(() => {
-              if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              if (recordingSessionIdRef.current === currentSessionId && mediaRecorderRef.current?.state === 'recording') {
+                audioDiagnostics.log('REC', `[Attempt #${attemptId}] 1.0s post-sentence timer fired. Stopping MediaRecorder.`);
                 try {
                   mediaRecorderRef.current.stop();
-                } catch (e) {}
+                } catch (e) {
+                  audioDiagnostics.log('REC', `[Attempt #${attemptId}] Error stopping MediaRecorder on timer: ${e}`);
+                }
               }
             }, 1000);
           });
         }
       };
 
-      // Video playback starts after recorder is actively running
       recorder.onstart = () => {
-        triggerVideoPlayback();
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onstart event fired`);
+        audioDiagnostics.updateState({ recState: 'recording' });
+        if (recordingSessionIdRef.current === currentSessionId) {
+          triggerVideoPlayback();
+        }
       };
 
-      // Start recording immediately
+      // Start recording
+      audioDiagnostics.log('REC', `[Attempt #${attemptId}] Calling MediaRecorder.start(50)...`);
       recorder.start(50);
       setIsRecording(true);
 
-      // Safeguard timeout in case browser skips or delays onstart event
+      // Safeguard fallback in case browser skips or delays onstart event
       setTimeout(() => {
-        if (!videoTriggered && mediaRecorderRef.current?.state === 'recording') {
+        if (recordingSessionIdRef.current === currentSessionId && !videoTriggered && mediaRecorderRef.current?.state === 'recording') {
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Safeguard fallback triggered video playback (onstart event delayed or omitted by browser)`);
           triggerVideoPlayback();
         }
       }, 50);
 
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Microphone error:', err);
-      setMicPermissionDenied(true);
-      setIsRecording(false);
+      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Exception in handleStartRecording: ${err?.name || err} - ${err?.message || err}`);
+      if (recordingSessionIdRef.current === currentSessionId) {
+        setMicPermissionDenied(true);
+        stopRecordingProcess(`[Attempt #${attemptId}] Microphone permission or access exception`);
+      }
     }
-  };
-
-  const stopRecordingProcess = () => {
-    if (recordingStopTimeoutRef.current) {
-      window.clearTimeout(recordingStopTimeoutRef.current);
-      recordingStopTimeoutRef.current = null;
-    }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-    // Stop all active microphone tracks and release hardware immediately
-    if (activeStreamRef.current) {
-      activeStreamRef.current.getTracks().forEach((track) => track.stop());
-      activeStreamRef.current = null;
-    }
-    if (playerRef.current) {
-      playerRef.current.pause();
-      setIsPlayingClip(false);
-    }
-    setIsRecording(false);
   };
 
   // Play learner's voice recording
@@ -341,20 +444,24 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       return;
     }
 
+    audioDiagnostics.log('REC', 'Playing recorded voice audio...');
     const audio = new Audio(recordingBlobUrl);
     audioElementRef.current = audio;
     setIsPlayingRecording(true);
 
     audio.onended = () => {
+      audioDiagnostics.log('REC', 'Voice audio playback ended.');
       setIsPlayingRecording(false);
     };
 
-    audio.onerror = () => {
+    audio.onerror = (e) => {
+      audioDiagnostics.log('REC', `Voice audio playback error: ${e}`);
       setIsPlayingRecording(false);
     };
 
     audio.play().catch((err) => {
       console.warn('Playback error:', err);
+      audioDiagnostics.log('REC', `Voice audio play() rejected: ${err}`);
       setIsPlayingRecording(false);
     });
   };

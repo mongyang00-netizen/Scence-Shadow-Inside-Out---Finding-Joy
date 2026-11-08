@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from 'react';
-import { MOVIE_SETTINGS, ONE_LINE_CREDIT } from '../constants';
-import { ExternalLink, AlertTriangle, Play, Pause, RefreshCw } from 'lucide-react';
+import { MOVIE_SETTINGS } from '../constants';
+import { ExternalLink, AlertTriangle, RefreshCw } from 'lucide-react';
+import { audioDiagnostics } from '../utils/audioDiagnostics';
 
 declare global {
   interface Window {
@@ -49,7 +50,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
     const [isPlayerReady, setIsPlayerReady] = useState(false);
     const [hasError, setHasError] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [isPlaying, setIsPlaying] = useState(false);
+    const [, setIsPlaying] = useState(false);
 
     // Track active segment
     const activeSegmentRef = useRef<{
@@ -63,6 +64,13 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
 
     const loopTimeoutRef = useRef<number | null>(null);
     const pollIntervalRef = useRef<number | null>(null);
+
+    // Diagnostics refs
+    const playRequestTimeRef = useRef<number | null>(null);
+    const lastTimeRef = useRef<{ time: number; timestamp: number }>({ time: 0, timestamp: 0 });
+    const bufferingStartRef = useRef<number | null>(null);
+    const timeFrozenLoggedRef = useRef<boolean>(false);
+    const bufferingLoggedRef = useRef<boolean>(false);
 
     // Clean up timers
     const clearPollInterval = () => {
@@ -91,6 +99,8 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       const initPlayer = () => {
         if (!window.YT || !window.YT.Player) return;
 
+        audioDiagnostics.log('YT', `Initializing YouTube Player (videoId="${MOVIE_SETTINGS.videoId}")`);
+
         try {
           playerRef.current = new window.YT.Player(containerId.current, {
             videoId: MOVIE_SETTINGS.videoId,
@@ -107,6 +117,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
               onReady: () => {
                 if (!isMounted) return;
                 setIsPlayerReady(true);
+                audioDiagnostics.log('YT', 'onReady event fired: YouTube Player is ready');
                 try {
                   playerRef.current.setPlaybackRate(playbackSpeed);
                 } catch (e) {
@@ -116,6 +127,57 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
               onStateChange: (event: any) => {
                 if (!isMounted) return;
                 const state = event.data;
+                const stateNames: Record<number, string> = {
+                  1: 'PLAYING',
+                  2: 'PAUSED',
+                  3: 'BUFFERING',
+                  0: 'ENDED',
+                  '-1': 'UNSTARTED',
+                  5: 'CUED'
+                };
+                const stateName = stateNames[state] || `UNKNOWN(${state})`;
+                let vol = 100;
+                let muted = false;
+                let loadedFraction = 0;
+                let currTime = 0;
+
+                try {
+                  if (playerRef.current?.getVolume) vol = playerRef.current.getVolume();
+                  if (playerRef.current?.isMuted) muted = playerRef.current.isMuted();
+                  if (playerRef.current?.getVideoLoadedFraction) loadedFraction = playerRef.current.getVideoLoadedFraction();
+                  if (playerRef.current?.getCurrentTime) currTime = playerRef.current.getCurrentTime();
+                } catch (e) {}
+
+                // Reset diagnostic flags on state change
+                if (state === 3) { // BUFFERING
+                  if (!bufferingStartRef.current) bufferingStartRef.current = performance.now();
+                } else {
+                  bufferingStartRef.current = null;
+                  bufferingLoggedRef.current = false;
+                }
+                if (state !== 1) { // Not PLAYING
+                  timeFrozenLoggedRef.current = false;
+                }
+
+                // Calculate play start latency
+                if (state === 1 && playRequestTimeRef.current !== null) {
+                  const latency = Math.round(performance.now() - playRequestTimeRef.current);
+                  audioDiagnostics.updateState({ timeToStartPlayingMs: latency });
+                  audioDiagnostics.log('YT', `Playback started: time advanced to ${currTime.toFixed(2)}s (Latency from request: ${latency}ms)`);
+                  playRequestTimeRef.current = null;
+                }
+
+                audioDiagnostics.updateState({
+                  ytState: stateName,
+                  ytStateCode: state,
+                  ytVolume: vol,
+                  ytIsMuted: muted,
+                  ytLoadedFraction: loadedFraction,
+                  ytTime: currTime
+                });
+
+                audioDiagnostics.log('YT', `onStateChange -> ${stateName} (${state}) [time=${currTime.toFixed(2)}s, vol=${vol}%, muted=${muted}, buffered=${(loadedFraction * 100).toFixed(1)}%]`);
+
                 // 1 = PLAYING
                 if (state === 1 || state === window.YT?.PlayerState?.PLAYING) {
                   setIsPlaying(true);
@@ -136,7 +198,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
                   } catch (e) {
                     // ignore
                   }
-                  // Start monitoring only when video is actively playing (100ms interval)
+                  // Start monitoring only when video is actively playing (25ms interval)
                   startPlaybackMonitor();
                 } else if (
                   state === 2 ||
@@ -153,6 +215,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
               onError: (event: any) => {
                 if (!isMounted) return;
                 console.warn('YouTube Player error:', event.data);
+                audioDiagnostics.log('YT', `onError event fired with code ${event.data}`);
                 // 101 or 150 = cannot embed
                 if (event.data === 101 || event.data === 150 || event.data === 2) {
                   setHasError(true);
@@ -165,6 +228,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
           });
         } catch (err) {
           console.error('Error creating YouTube player:', err);
+          audioDiagnostics.log('YT', `Failed to create YouTube Player instance: ${err}`);
           if (isMounted) {
             setHasError(true);
             setErrorMessage("This video can't play inside the app. Tap to open it on YouTube.");
@@ -173,6 +237,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       };
 
       if (!window.YT) {
+        audioDiagnostics.log('YT', 'Injecting YouTube IFrame API script tag...');
         const tag = document.createElement('script');
         tag.src = 'https://www.youtube.com/iframe_api';
         tag.async = true;
@@ -205,13 +270,14 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       if (isPlayerReady && playerRef.current?.setPlaybackRate) {
         try {
           playerRef.current.setPlaybackRate(playbackSpeed);
+          audioDiagnostics.log('YT', `setPlaybackRate(${playbackSpeed}) applied`);
         } catch (err) {
           console.warn('Failed to set playback rate:', err);
         }
       }
     }, [playbackSpeed, isPlayerReady]);
 
-    // Playback monitor running only while video is actively playing (100ms interval as per PRD)
+    // Playback monitor running only while video is actively playing (25ms interval)
     const startPlaybackMonitor = () => {
       clearPollInterval();
 
@@ -222,12 +288,38 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
           const currentTime = playerRef.current.getCurrentTime();
           if (typeof currentTime !== 'number') return;
 
+          let loadedFraction = 0;
+          if (playerRef.current.getVideoLoadedFraction) {
+            loadedFraction = playerRef.current.getVideoLoadedFraction();
+          }
+
+          audioDiagnostics.updateState({ ytTime: currentTime, ytLoadedFraction: loadedFraction });
+
           if (onTimeUpdate) {
             onTimeUpdate(currentTime);
           }
 
+          // Diagnostic check 3: PLAYING state but time frozen
+          const now = performance.now();
+          if (lastTimeRef.current.time === currentTime) {
+            if (now - lastTimeRef.current.timestamp > 1200 && !timeFrozenLoggedRef.current) {
+              timeFrozenLoggedRef.current = true;
+              audioDiagnostics.log('YT', `[DIAGNOSIS 3] PLAYING state active but video time frozen at ${currentTime.toFixed(2)}s (Buffered: ${(loadedFraction * 100).toFixed(1)}%)`);
+            }
+          } else {
+            lastTimeRef.current = { time: currentTime, timestamp: now };
+            timeFrozenLoggedRef.current = false;
+          }
+
+          // Diagnostic check 1: Stuck in BUFFERING (> 2500ms)
+          if (bufferingStartRef.current && (now - bufferingStartRef.current > 2500) && !bufferingLoggedRef.current) {
+            bufferingLoggedRef.current = true;
+            audioDiagnostics.log('YT', `[DIAGNOSIS 1] Stuck in BUFFERING state for > 2.5s at time ${currentTime.toFixed(2)}s (Buffered: ${(loadedFraction * 100).toFixed(1)}%)`);
+          }
+
           // 1. Enforce global practice range ceiling (64.6s)
           if (currentTime >= MOVIE_SETTINGS.practiceEnd) {
+            audioDiagnostics.log('YT', `Reached practice range end ceiling (64.6s). Pausing video.`);
             playerRef.current.pauseVideo();
             playerRef.current.seekTo(MOVIE_SETTINGS.practiceEnd, true);
             clearTimers();
@@ -248,6 +340,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
           // 2. Active sentence segment end check
           if (activeSegmentRef.current && currentTime >= activeSegmentRef.current.end) {
             const seg = activeSegmentRef.current;
+            audioDiagnostics.log('YT', `Reached segment end (${seg.end}s). Pausing video.`);
             playerRef.current.pauseVideo();
             clearPollInterval();
             setIsPlaying(false);
@@ -261,6 +354,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
 
             // Loop check
             if (isLoopingRef.current) {
+              audioDiagnostics.log('YT', `Looping active: waiting 1.5s before repeating segment (${seg.start}s - ${seg.end}s)`);
               clearLoopTimeout();
               loopTimeoutRef.current = window.setTimeout(() => {
                 if (isLoopingRef.current) {
@@ -289,12 +383,17 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
       if (!playerRef.current) return;
       try {
         clearTimers();
+        playRequestTimeRef.current = performance.now();
+        const attemptNum = audioDiagnostics.getAttempt();
+        audioDiagnostics.log('YT', `executeSegmentPlay called [Attempt #${attemptNum || 'N/A'}]: start=${start}s, end=${end}s`);
+
         activeSegmentRef.current = { start, end, onEnd };
         playerRef.current.seekTo(start, true);
         playerRef.current.playVideo();
         startPlaybackMonitor();
       } catch (err) {
         console.warn('Playback error:', err);
+        audioDiagnostics.log('YT', `executeSegmentPlay exception: ${err}`);
       }
     };
 
@@ -303,9 +402,11 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         executeSegmentPlay(start, end, onEnd);
       },
       playFullClip: (onEnd?: () => void) => {
+        audioDiagnostics.log('YT', `playFullClip requested: ${MOVIE_SETTINGS.practiceStart}s - ${MOVIE_SETTINGS.practiceEnd}s`);
         executeSegmentPlay(MOVIE_SETTINGS.practiceStart, MOVIE_SETTINGS.practiceEnd, onEnd);
       },
       stop: () => {
+        audioDiagnostics.log('YT', 'stop() requested');
         clearTimers();
         activeSegmentRef.current = null;
         if (playerRef.current?.pauseVideo) {
@@ -317,6 +418,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         }
       },
       pause: () => {
+        audioDiagnostics.log('YT', 'pause() requested');
         clearTimers();
         if (playerRef.current?.pauseVideo) {
           try {
@@ -337,6 +439,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         return 0;
       },
       setSpeed: (rate: number) => {
+        audioDiagnostics.log('YT', `setSpeed(${rate}) requested`);
         if (playerRef.current?.setPlaybackRate) {
           try {
             playerRef.current.setPlaybackRate(rate);
@@ -346,6 +449,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         }
       },
       seekTo: (seconds: number) => {
+        audioDiagnostics.log('YT', `seekTo(${seconds}s) requested`);
         if (playerRef.current?.seekTo) {
           try {
             playerRef.current.seekTo(seconds, true);
@@ -355,6 +459,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         }
       },
       cueSegment: (start: number) => {
+        audioDiagnostics.log('YT', `cueSegment(${start}s) requested`);
         clearTimers();
         activeSegmentRef.current = null;
         if (playerRef.current) {

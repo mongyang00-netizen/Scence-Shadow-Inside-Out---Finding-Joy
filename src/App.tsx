@@ -7,6 +7,7 @@ import { PracticeScreen } from './components/PracticeScreen';
 import { EditSentencesScreen } from './components/EditSentencesScreen';
 import { FinishScreen } from './components/FinishScreen';
 import { YouTubePlayerHandle } from './components/YouTubePlayer';
+import { AudioDiagnosticsPanel } from './components/AudioDiagnosticsPanel';
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ScreenType>('start');
@@ -134,6 +135,9 @@ export default function App() {
           onGoToList={() => setCurrentScreen('list')}
         />
       )}
+
+      {/* Real-time iOS Audio Diagnostic Overlay (renders ONLY when URL contains ?debugAudio=1) */}
+      <AudioDiagnosticsPanel />
     </div>
   );
 }
