@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { audioDiagnostics, DiagnosticLog, DiagnosticState } from '../utils/audioDiagnostics';
-import { Activity, Trash2, ChevronDown, ChevronUp, Copy, Check, Volume2, Mic } from 'lucide-react';
+import { Activity, Trash2, ChevronDown, ChevronUp, Copy, Check, Volume2, Mic, Sparkles } from 'lucide-react';
 
 export const AudioDiagnosticsPanel: React.FC = () => {
   const [isEnabled, setIsEnabled] = useState(false);
@@ -27,6 +27,7 @@ export const AudioDiagnosticsPanel: React.FC = () => {
     trackEnabled: false,
     chunksCount: 0,
     totalBytes: 0,
+    speechState: 'idle'
   });
 
   useEffect(() => {
@@ -121,12 +122,12 @@ export const AudioDiagnosticsPanel: React.FC = () => {
                 <div>Start Latency: {state.timeToStartPlayingMs !== null ? `${state.timeToStartPlayingMs}ms` : 'N/A'}</div>
               </div>
 
-              {/* Mic & Recorder Card */}
+              {/* Mic, Recorder & Speech Card */}
               <div className="bg-slate-800/80 p-2 rounded-lg border border-slate-700 space-y-1">
                 <div className="text-slate-400 font-sans font-bold flex items-center justify-between">
                   <div className="flex items-center gap-1">
                     <Mic className="w-3 h-3 text-rose-400" />
-                    <span>Mic & Recorder</span>
+                    <span>Mic & Speech</span>
                   </div>
                 </div>
                 <div className="text-slate-200 font-bold">
@@ -136,7 +137,12 @@ export const AudioDiagnosticsPanel: React.FC = () => {
                   </span>
                 </div>
                 <div>Track Muted: <span className={state.trackMuted ? 'text-rose-400 font-bold' : 'text-emerald-400'}>{state.trackMuted ? 'YES (Silent!)' : 'NO'}</span></div>
-                <div>ReadyState: {state.trackReadyState}</div>
+                <div>
+                  Speech Recognition:{' '}
+                  <span className={state.speechState === 'listening' ? 'text-sky-400 font-bold animate-pulse' : 'text-slate-300'}>
+                    {state.speechState}
+                  </span>
+                </div>
                 <div>Size: {state.totalBytes} B ({state.chunksCount} chunks)</div>
                 <div className="truncate text-[10px] text-slate-400">Label: {state.trackLabel}</div>
               </div>
@@ -155,7 +161,7 @@ export const AudioDiagnosticsPanel: React.FC = () => {
                 <span className="text-slate-500 font-normal text-[9px]">Newest first</span>
               </div>
               {logs.length === 0 ? (
-                <div className="text-slate-500 italic text-[11px] py-1">No audio events logged yet. Press Play or Record.</div>
+                <div className="text-slate-500 italic text-[11px] py-1">No audio events logged yet. Press Play, Record or Check My Words.</div>
               ) : (
                 <div className="space-y-1 font-mono text-[10px]">
                   {logs.map((log) => {
@@ -163,6 +169,7 @@ export const AudioDiagnosticsPanel: React.FC = () => {
                       YT: 'bg-sky-500/20 text-sky-300 border-sky-500/30',
                       MIC: 'bg-rose-500/20 text-rose-300 border-rose-500/30',
                       REC: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
+                      SPEECH: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
                       SESSION: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
                       SYS: 'bg-slate-700 text-slate-300 border-slate-600'
                     };

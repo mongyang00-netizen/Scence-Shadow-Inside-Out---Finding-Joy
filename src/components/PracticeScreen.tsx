@@ -18,7 +18,6 @@ import {
   Sparkles,
   ArrowLeft,
   AlertCircle,
-  RotateCcw,
   ExternalLink
 } from 'lucide-react';
 
@@ -72,7 +71,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const recordingSessionIdRef = useRef<number>(0);
   const isStartingRecordingRef = useRef<boolean>(false);
 
-  // Web Speech recognition state
+  // Web Speech recognition state & ref
   const [isListeningSpeech, setIsListeningSpeech] = useState<boolean>(false);
   const [speechResult, setSpeechResult] = useState<{
     transcript: string;
@@ -80,11 +79,12 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     totalWords: number;
   } | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
+  const speechRecognitionRef = useRef<any>(null);
 
   const isSpeechSupported = typeof window !== 'undefined' &&
     !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
-  // Clean up any active audio tracks on unmount
+  // Clean up any active audio tracks or speech recognition on unmount
   useEffect(() => {
     return () => {
       recordingSessionIdRef.current += 1;
@@ -92,12 +92,27 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         activeStreamRef.current.getTracks().forEach((track) => track.stop());
         activeStreamRef.current = null;
       }
+      if (speechRecognitionRef.current) {
+        try {
+          speechRecognitionRef.current.abort();
+        } catch (e) {}
+        speechRecognitionRef.current = null;
+      }
     };
   }, []);
 
   // Reset recording/text state, clear timers/loops, and cue player on sentence change
   useEffect(() => {
     audioDiagnostics.log('SYS', `Switched to Sentence #${sentence.id} ("${sentence.text.substring(0, 30)}...")`);
+
+    // Clean up active speech recognition
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
+    }
+
     // 1. If currently recording or playing voice, stop immediately and safely release mic
     recordingSessionIdRef.current += 1;
     isStartingRecordingRef.current = false;
@@ -236,6 +251,14 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     const attemptId = audioDiagnostics.incrementAttempt();
     audioDiagnostics.log('REC', `[Attempt #${attemptId}] Record button clicked (isRecording=${isRecording}, isStarting=${isStartingRecordingRef.current})`);
 
+    // Clean up active speech recognition if user starts recording
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
+    }
+
     if (isRecording || isStartingRecordingRef.current) {
       // Manual stop or duplicate click handling
       stopRecordingProcess(`[Attempt #${attemptId}] User clicked stop button`);
@@ -244,6 +267,11 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
     // Completely reset any previous session before starting a new one
     stopRecordingProcess(`[Attempt #${attemptId}] Clearing previous recording session before start`);
+
+    // STEP 0: Prime WebKit user-activation on YouTube player synchronously within user touch handler
+    if (playerRef.current?.primeUserGesture) {
+      playerRef.current.primeUserGesture(sentence.start);
+    }
 
     const currentSessionId = recordingSessionIdRef.current;
     isStartingRecordingRef.current = true;
@@ -475,14 +503,33 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     });
   };
 
-  // Web Speech recognition (Check My Words)
+  // Web Speech recognition (Check My Words) with exhaustive lifecycle event logging & session isolation
   const handleCheckWords = () => {
-    if (!isSpeechSupported) return;
+    audioDiagnostics.log('SPEECH', 'Check My Words button clicked');
+
+    if (!isSpeechSupported) {
+      audioDiagnostics.log('SPEECH', 'Web Speech API is not supported on this browser');
+      setSpeechError('Web Speech API is not supported on this browser.');
+      return;
+    }
+
+    // 1. Completely stop and release any active MediaRecorder or getUserMedia stream tracks FIRST
+    stopRecordingProcess('Clearing active MediaRecorder/stream before starting Speech Recognition');
+
+    // 2. Abort any existing SpeechRecognition instance
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch (e) {}
+      speechRecognitionRef.current = null;
+    }
 
     try {
       const SpeechRecognition =
         (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       const recognition = new SpeechRecognition();
+      speechRecognitionRef.current = recognition;
+
       recognition.lang = 'en-US';
       recognition.continuous = false;
       recognition.interimResults = false;
@@ -491,10 +538,49 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       setIsListeningSpeech(true);
       setSpeechError(null);
       setSpeechResult(null);
+      audioDiagnostics.updateState({ speechState: 'initializing' });
+
+      // Comprehensive WebSpeech API event lifecycle diagnostics for iOS WebKit
+      recognition.onstart = () => {
+        audioDiagnostics.log('SPEECH', 'onstart: SpeechRecognition engine started');
+        setIsListeningSpeech(true);
+        audioDiagnostics.updateState({ speechState: 'listening' });
+      };
+
+      recognition.onaudiostart = () => {
+        audioDiagnostics.log('SPEECH', 'onaudiostart: Audio capture started by SpeechRecognition');
+      };
+
+      recognition.onsoundstart = () => {
+        audioDiagnostics.log('SPEECH', 'onsoundstart: Sound input detected by SpeechRecognition');
+      };
+
+      recognition.onspeechstart = () => {
+        audioDiagnostics.log('SPEECH', 'onspeechstart: Speech detected');
+      };
+
+      recognition.onspeechend = () => {
+        audioDiagnostics.log('SPEECH', 'onspeechend: Speech input ended');
+      };
+
+      recognition.onsoundend = () => {
+        audioDiagnostics.log('SPEECH', 'onsoundend: Sound input ended');
+      };
+
+      recognition.onaudioend = () => {
+        audioDiagnostics.log('SPEECH', 'onaudioend: Audio capture ended');
+      };
 
       recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
+        const transcript = event.results?.[0]?.[0]?.transcript || '';
+        const confidence = event.results?.[0]?.[0]?.confidence ?? 0;
+        audioDiagnostics.log('SPEECH', `onresult: transcript="${transcript}" (confidence=${(confidence * 100).toFixed(0)}%)`);
         setIsListeningSpeech(false);
+
+        if (!transcript || transcript.trim().length === 0) {
+          setSpeechError('Could not catch your voice clearly. Please try speaking into the mic again!');
+          return;
+        }
 
         // Normalize words and compare
         const targetWords = sentence.text.split(/\s+/).map((w) =>
@@ -519,20 +605,42 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       recognition.onerror = (e: any) => {
-        console.warn('Speech recognition error:', e);
+        const errType = e?.error || 'unknown';
+        const errMessage = e?.message || '';
+        audioDiagnostics.log('SPEECH', `onerror: error="${errType}", message="${errMessage}"`);
         setIsListeningSpeech(false);
-        setSpeechError('Could not catch your voice. Please try speaking clearly into the mic!');
+        audioDiagnostics.updateState({ speechState: `error:${errType}` });
+
+        if (errType === 'not-allowed' || errType === 'service-not-allowed') {
+          setSpeechError('Microphone permission for Speech Recognition was not allowed. / 마이크 권한이 허용되지 않았습니다.');
+        } else if (errType === 'audio-capture') {
+          setSpeechError('Microphone hardware was busy. Please tap Check My Words again. / 마이크 장치가 사용 중입니다. 다시 시도해 주세요.');
+        } else if (errType === 'no-speech') {
+          setSpeechError('No speech was detected. Please speak clearly into the mic! / 음성이 감지되지 않았습니다.');
+        } else if (errType === 'network') {
+          setSpeechError('Network connection needed for speech recognition. / 네트워크 연결을 확인해 주세요.');
+        } else if (errType === 'aborted') {
+          setSpeechError('Speech recognition was canceled.');
+        } else {
+          setSpeechError('Could not catch your voice. Please try speaking clearly into the mic!');
+        }
       };
 
       recognition.onend = () => {
+        audioDiagnostics.log('SPEECH', 'onend: SpeechRecognition session closed');
         setIsListeningSpeech(false);
+        audioDiagnostics.updateState({ speechState: 'idle' });
+        speechRecognitionRef.current = null;
       };
 
+      audioDiagnostics.log('SPEECH', 'Calling recognition.start()...');
       recognition.start();
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Recognition start error:', err);
+      audioDiagnostics.log('SPEECH', `Exception starting SpeechRecognition: ${err?.name || err} - ${err?.message || err}`);
       setIsListeningSpeech(false);
-      setSpeechError('Speech recognition was unavailable.');
+      audioDiagnostics.updateState({ speechState: 'error' });
+      setSpeechError('Speech recognition was unavailable. Please try again.');
     }
   };
 

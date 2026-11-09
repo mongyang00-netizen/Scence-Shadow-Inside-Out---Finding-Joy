@@ -1,7 +1,7 @@
 export interface DiagnosticLog {
   id: number;
   timestamp: string;
-  category: 'YT' | 'MIC' | 'REC' | 'SESSION' | 'SYS';
+  category: 'YT' | 'MIC' | 'REC' | 'SPEECH' | 'SESSION' | 'SYS';
   message: string;
   data?: any;
 }
@@ -26,6 +26,7 @@ export interface DiagnosticState {
   trackEnabled: boolean;
   chunksCount: number;
   totalBytes: number;
+  speechState: string;
 }
 
 type DiagnosticListener = (logs: DiagnosticLog[], state: DiagnosticState) => void;
@@ -57,6 +58,7 @@ class AudioDiagnosticsManager {
     trackEnabled: false,
     chunksCount: 0,
     totalBytes: 0,
+    speechState: 'idle'
   };
 
   constructor() {
@@ -94,7 +96,7 @@ class AudioDiagnosticsManager {
     }
   }
 
-  public log(category: 'YT' | 'MIC' | 'REC' | 'SESSION' | 'SYS', message: string, data?: any) {
+  public log(category: 'YT' | 'MIC' | 'REC' | 'SPEECH' | 'SESSION' | 'SYS', message: string, data?: any) {
     if (!this.isEnabled) return;
     const now = new Date();
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
@@ -157,6 +159,7 @@ Attempts Total: ${this.currentState.attemptCounter}
 YT State: ${this.currentState.ytState} (${this.currentState.ytStateCode}) | Time: ${this.currentState.ytTime.toFixed(2)}s | Vol: ${this.currentState.ytVolume}% | Muted: ${this.currentState.ytIsMuted} | Loaded: ${(this.currentState.ytLoadedFraction * 100).toFixed(1)}% | Play Latency: ${this.currentState.timeToStartPlayingMs ?? 'N/A'}ms
 Recorder State: ${this.currentState.recState} | Track Muted: ${this.currentState.trackMuted} | Track State: ${this.currentState.trackReadyState} | Label: "${this.currentState.trackLabel}"
 Recorded Bytes: ${this.currentState.totalBytes} B (${this.currentState.chunksCount} chunks)
+Speech Recognition State: ${this.currentState.speechState}
 AudioSession: ${this.currentState.audioSessionType} (${this.currentState.audioSessionState})
 
 === EVENT LOGS (${this.logs.length}) ===

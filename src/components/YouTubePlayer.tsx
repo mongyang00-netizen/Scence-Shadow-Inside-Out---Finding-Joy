@@ -20,6 +20,7 @@ export interface YouTubePlayerHandle {
   seekTo: (seconds: number) => void;
   cueSegment: (start: number) => void;
   isReady: () => boolean;
+  primeUserGesture: (start: number) => void;
 }
 
 interface YouTubePlayerProps {
@@ -52,11 +53,12 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [, setIsPlaying] = useState(false);
 
-    // Track active segment
+    // Track active segment with playback confirmation flag
     const activeSegmentRef = useRef<{
       start: number;
       end: number;
       onEnd?: () => void;
+      hasStartedPlaying: boolean;
     } | null>(null);
 
     const isLoopingRef = useRef(isLooping);
@@ -114,10 +116,22 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
               cc_load_policy: 0
             },
             events: {
-              onReady: () => {
+              onReady: (event: any) => {
                 if (!isMounted) return;
                 setIsPlayerReady(true);
                 audioDiagnostics.log('YT', 'onReady event fired: YouTube Player is ready');
+
+                // Explicitly configure allow="autoplay" on generated iframe for WebKit/iOS Safari security policy
+                try {
+                  const iframe = event.target?.getIframe?.() || document.getElementById(containerId.current);
+                  if (iframe && iframe.tagName === 'IFRAME') {
+                    iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+                    audioDiagnostics.log('YT', 'Set allow="autoplay; encrypted-media" attribute on YouTube iframe element');
+                  }
+                } catch (e) {
+                  // ignore
+                }
+
                 try {
                   playerRef.current.setPlaybackRate(playbackSpeed);
                 } catch (e) {
@@ -165,6 +179,16 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
                   audioDiagnostics.updateState({ timeToStartPlayingMs: latency });
                   audioDiagnostics.log('YT', `Playback started: time advanced to ${currTime.toFixed(2)}s (Latency from request: ${latency}ms)`);
                   playRequestTimeRef.current = null;
+                }
+
+                // Confirm segment playback started if state is PLAYING and currentTime is within valid segment bounds
+                if (state === 1 || state === window.YT?.PlayerState?.PLAYING) {
+                  if (activeSegmentRef.current && !activeSegmentRef.current.hasStartedPlaying) {
+                    if (currTime < activeSegmentRef.current.end - 0.08) {
+                      activeSegmentRef.current.hasStartedPlaying = true;
+                      audioDiagnostics.log('YT', `Segment playback confirmed started via onStateChange (PLAYING) at time ${currTime.toFixed(2)}s`);
+                    }
+                  }
                 }
 
                 audioDiagnostics.updateState({
@@ -337,36 +361,56 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
             return;
           }
 
-          // 2. Active sentence segment end check
-          if (activeSegmentRef.current && currentTime >= activeSegmentRef.current.end) {
+          // 2. Active sentence segment end check with stale-position safeguard
+          if (activeSegmentRef.current) {
             const seg = activeSegmentRef.current;
-            audioDiagnostics.log('YT', `Reached segment end (${seg.end}s). Pausing video.`);
-            playerRef.current.pauseVideo();
-            clearPollInterval();
-            setIsPlaying(false);
 
-            if (seg.onEnd) {
-              seg.onEnd();
-            }
-            if (onEndedSegment) {
-              onEndedSegment();
-            }
+            // Confirm playback start if time is in range and state is PLAYING or time has reached near start
+            if (!seg.hasStartedPlaying) {
+              let pState = -1;
+              try {
+                if (playerRef.current.getPlayerState) pState = playerRef.current.getPlayerState();
+              } catch (e) {}
 
-            // Loop check
-            if (isLoopingRef.current) {
-              audioDiagnostics.log('YT', `Looping active: waiting 1.5s before repeating segment (${seg.start}s - ${seg.end}s)`);
-              clearLoopTimeout();
-              loopTimeoutRef.current = window.setTimeout(() => {
-                if (isLoopingRef.current) {
-                  executeSegmentPlay(seg.start, seg.end, seg.onEnd);
-                } else {
-                  activeSegmentRef.current = null;
+              if (pState === 1 || (currentTime >= seg.start - 0.5 && currentTime < seg.end - 0.08)) {
+                if (currentTime < seg.end - 0.08) {
+                  seg.hasStartedPlaying = true;
+                  audioDiagnostics.log('YT', `Segment playback confirmed started via monitor check at ${currentTime.toFixed(2)}s (Range: ${seg.start}s - ${seg.end}s)`);
                 }
-              }, 1500); // Wait 1.5 seconds for learner repetition
-            } else {
-              activeSegmentRef.current = null;
+              }
             }
-            return;
+
+            // CRITICAL: Only trigger segment end if playback has been confirmed as started!
+            // This prevents stale currentTime from previous segments triggering instantaneous 50ms termination.
+            if (seg.hasStartedPlaying && currentTime >= seg.end) {
+              audioDiagnostics.log('YT', `Reached segment end (${seg.end}s). Pausing video.`);
+              playerRef.current.pauseVideo();
+              clearPollInterval();
+              setIsPlaying(false);
+
+              if (seg.onEnd) {
+                seg.onEnd();
+              }
+              if (onEndedSegment) {
+                onEndedSegment();
+              }
+
+              // Loop check
+              if (isLoopingRef.current) {
+                audioDiagnostics.log('YT', `Looping active: waiting 1.5s before repeating segment (${seg.start}s - ${seg.end}s)`);
+                clearLoopTimeout();
+                loopTimeoutRef.current = window.setTimeout(() => {
+                  if (isLoopingRef.current) {
+                    executeSegmentPlay(seg.start, seg.end, seg.onEnd);
+                  } else {
+                    activeSegmentRef.current = null;
+                  }
+                }, 1500); // Wait 1.5 seconds for learner repetition
+              } else {
+                activeSegmentRef.current = null;
+              }
+              return;
+            }
           }
 
           // 3. Floor check (cannot play before 0s)
@@ -387,7 +431,13 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
         const attemptNum = audioDiagnostics.getAttempt();
         audioDiagnostics.log('YT', `executeSegmentPlay called [Attempt #${attemptNum || 'N/A'}]: start=${start}s, end=${end}s`);
 
-        activeSegmentRef.current = { start, end, onEnd };
+        activeSegmentRef.current = {
+          start,
+          end,
+          onEnd,
+          hasStartedPlaying: false // Reset flag: segment has not yet confirmed playback start!
+        };
+
         playerRef.current.seekTo(start, true);
         playerRef.current.playVideo();
         startPlaybackMonitor();
@@ -472,6 +522,18 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, YouTubePlayerProps>
           }
         }
         setIsPlaying(false);
+      },
+      primeUserGesture: (start: number) => {
+        audioDiagnostics.log('YT', `primeUserGesture(${start}s) called synchronously in user click handler`);
+        if (playerRef.current) {
+          try {
+            playerRef.current.seekTo(start, true);
+            playerRef.current.playVideo();
+            playerRef.current.pauseVideo();
+          } catch (e) {
+            // ignore
+          }
+        }
       },
       isReady: () => isPlayerReady
     }));
