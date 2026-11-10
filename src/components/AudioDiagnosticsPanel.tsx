@@ -1,8 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { audioDiagnostics, DiagnosticLog, DiagnosticState } from '../utils/audioDiagnostics';
-import { Activity, Trash2, ChevronDown, ChevronUp, Copy, Check, Volume2, Mic, Sparkles } from 'lucide-react';
+import { Activity, Trash2, ChevronDown, ChevronUp, Copy, Check, Volume2, Mic, ExternalLink } from 'lucide-react';
 
-export const AudioDiagnosticsPanel: React.FC = () => {
+interface AudioDiagnosticsPanelProps {
+  onOpenSpeechTest?: () => void;
+}
+
+export const AudioDiagnosticsPanel: React.FC<AudioDiagnosticsPanelProps> = ({ onOpenSpeechTest }) => {
   const [isEnabled, setIsEnabled] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -25,9 +29,18 @@ export const AudioDiagnosticsPanel: React.FC = () => {
     trackMuted: false,
     trackReadyState: 'N/A',
     trackEnabled: false,
+    trackSettingsSummary: 'N/A',
     chunksCount: 0,
     totalBytes: 0,
-    speechState: 'idle'
+    speechState: 'idle',
+    lastBlobHex: '',
+    lastBlobAscii: '',
+    lastBlobSize: null,
+    lastBlobMime: '',
+    lastChunkSizes: '[]',
+    lastRecordingDurationMs: null,
+    audioElementStatus: 'none',
+    lateCallbacksCount: 0
   });
 
   useEffect(() => {
@@ -69,6 +82,16 @@ export const AudioDiagnosticsPanel: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1">
+            {onOpenSpeechTest && (
+              <button
+                onClick={onOpenSpeechTest}
+                className="p-1 px-2 text-emerald-300 hover:text-white bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/40 rounded flex items-center gap-1 transition-colors text-[10px] font-sans font-medium cursor-pointer"
+                title="Open Standalone Speech Recognition Test Page"
+              >
+                <span>Speech Test</span>
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            )}
             <button
               onClick={handleCopyLogs}
               className="p-1 px-2 text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded flex items-center gap-1 transition-colors text-[10px] font-sans font-medium"
@@ -153,6 +176,41 @@ export const AudioDiagnosticsPanel: React.FC = () => {
               <span className="text-slate-400 font-sans font-semibold">AudioSession API:</span>
               <span className="text-slate-200 font-semibold">{state.audioSessionType}</span>
             </div>
+
+            {/* Blob Byte Inspection Card */}
+            {state.lastBlobSize !== null && (
+              <div className={`p-2 rounded-lg border text-[11px] space-y-1 ${state.lastBlobSize <= 200 ? 'bg-rose-950/40 border-rose-600/50 text-rose-200' : 'bg-slate-800/80 border-slate-700 text-slate-200'}`}>
+                <div className="flex items-center justify-between font-sans font-bold">
+                  <span className="text-slate-300">Last Recording Payload Inspection</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${state.lastBlobSize <= 200 ? 'bg-rose-600 text-white font-bold' : 'bg-emerald-600/30 text-emerald-300'}`}>
+                    {state.lastBlobSize} B {state.lastRecordingDurationMs !== null ? `(${state.lastRecordingDurationMs}ms)` : ''}
+                  </span>
+                </div>
+                <div className="text-[10px] break-all">
+                  <span className="text-slate-400">Hex (first 32B): </span>
+                  <span className="font-mono text-amber-300">[{state.lastBlobHex || 'empty'}]</span>
+                </div>
+                <div className="text-[10px] break-all">
+                  <span className="text-slate-400">ASCII: </span>
+                  <span className="font-mono text-sky-300">"{state.lastBlobAscii || 'empty'}"</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  <span>Chunks: </span>
+                  <span className="font-mono text-slate-300">{state.lastChunkSizes}</span>
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  <span>Audio Element Status: </span>
+                  <span className="font-mono text-slate-300">{state.audioElementStatus}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Late Callbacks Warning */}
+            {state.lateCallbacksCount > 0 && (
+              <div className="bg-amber-950/60 border border-amber-500/60 p-2 rounded-lg text-amber-200 text-[11px] font-bold">
+                ⚠️ Race Detected: {state.lateCallbacksCount} callback(s) received for expired sessions!
+              </div>
+            )}
 
             {/* Timestamped Log Entries */}
             <div className="space-y-1 pt-1 border-t border-slate-800">

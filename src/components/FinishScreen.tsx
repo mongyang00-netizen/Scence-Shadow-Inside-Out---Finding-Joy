@@ -11,12 +11,14 @@ import {
   Mic,
   Award,
   AlertCircle,
-  Play
+  Play,
+  Bookmark
 } from 'lucide-react';
 
 interface FinishScreenProps {
   sentences: Sentence[];
   progress: Record<number, SentenceProgress>;
+  sessionNumber?: number;
   onPracticeSentence: (index: number) => void;
   onRestartAll: () => void;
   onGoToList: () => void;
@@ -25,6 +27,7 @@ interface FinishScreenProps {
 export const FinishScreen: React.FC<FinishScreenProps> = ({
   sentences,
   progress,
+  sessionNumber,
   onPracticeSentence,
   onRestartAll,
   onGoToList
@@ -63,6 +66,23 @@ export const FinishScreen: React.FC<FinishScreenProps> = ({
     }
   });
 
+  // Sentences where user selected words to practice more
+  const practiceWordsSentences: { sentence: Sentence; index: number; selectedWords: string[] }[] = [];
+  sentences.forEach((s, idx) => {
+    const p = progress[s.id];
+    if (p && p.practiceWords && p.practiceWords.length > 0) {
+      const words = s.text.split(' ');
+      const sortedIndices = [...p.practiceWords].sort((a, b) => a - b);
+      const selectedWords = sortedIndices
+        .filter((wIdx) => wIdx >= 0 && wIdx < words.length)
+        .map((wIdx) => words[wIdx]);
+
+      if (selectedWords.length > 0) {
+        practiceWordsSentences.push({ sentence: s, index: idx, selectedWords });
+      }
+    }
+  });
+
   return (
     <div className="flex flex-col min-h-screen bg-slate-100 max-w-lg mx-auto px-4 py-8 justify-between">
       <div className="space-y-6">
@@ -74,7 +94,7 @@ export const FinishScreen: React.FC<FinishScreenProps> = ({
 
           <div className="space-y-1">
             <span className="text-xs font-bold uppercase tracking-wider text-amber-600 bg-amber-100 px-3 py-1 rounded-full border border-amber-200">
-              Shadowing Complete
+              Shadowing Complete{sessionNumber ? ` · Session #${sessionNumber}` : ''}
             </span>
             <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
               Great Job! / 훌륭해요!
@@ -110,6 +130,63 @@ export const FinishScreen: React.FC<FinishScreenProps> = ({
             </p>
           </div>
         </div>
+
+        {/* Words to Practice Summary Card */}
+        {practiceWordsSentences.length > 0 && (
+          <div className="bg-white rounded-2xl p-4 border border-amber-200/90 shadow-xs space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+              <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
+                <Bookmark className="w-4 h-4 text-amber-500" />
+                <span>Words to Practice / 추가 연습 단어</span>
+              </div>
+              <span className="text-[11px] font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-200">
+                {practiceWordsSentences.reduce((acc, curr) => acc + curr.selectedWords.length, 0)}개 단어
+              </span>
+            </div>
+            <p className="text-xs text-slate-500">
+              내 녹음을 직접 듣고 더 연습하고 싶다고 선택한 단어들입니다.
+            </p>
+
+            <div className="space-y-2">
+              {practiceWordsSentences.map(({ sentence, index, selectedWords }) => (
+                <div
+                  key={sentence.id}
+                  className="p-3 rounded-xl bg-slate-50 border border-slate-200/60 flex items-center justify-between gap-3"
+                >
+                  <div className="text-xs space-y-1.5 pr-2 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-4 h-4 rounded-full bg-slate-200 text-slate-700 text-[10px] font-bold flex items-center justify-center shrink-0">
+                        {index + 1}
+                      </span>
+                      <span className="font-bold text-slate-800 shrink-0">{sentence.speaker}</span>
+                      <span className="text-[11px] text-slate-400 truncate">{sentence.korean}</span>
+                    </div>
+
+                    {/* Word tags in original sentence order */}
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedWords.map((word, wIdx) => (
+                        <span
+                          key={wIdx}
+                          className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-amber-950 font-bold text-xs"
+                        >
+                          {word}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => onPracticeSentence(index)}
+                    className="min-h-[40px] px-3 py-1.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-bold text-xs rounded-xl flex items-center gap-1 shrink-0 transition-all cursor-pointer shadow-xs"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Practice / 다시 연습</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Sentences marked with 😐 (Self-Check Needs Improvement) */}
         {needsPracticeSentences.length > 0 ? (

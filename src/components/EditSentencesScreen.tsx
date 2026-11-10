@@ -15,7 +15,8 @@ import {
   AlertTriangle,
   Check,
   RotateCcw,
-  Edit2
+  Edit2,
+  X
 } from 'lucide-react';
 
 interface EditSentencesScreenProps {
@@ -40,10 +41,13 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
   const [start, setStart] = useState<number>(0);
   const [end, setEnd] = useState<number>(3.0);
 
-  // Notifications / feedback
+  // Notifications / feedback & Modals
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importJsonText, setImportJsonText] = useState('');
+  const [importError, setImportError] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [showResetModal, setShowResetModal] = useState<boolean>(false);
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
   const duration = Math.max(0, end - start);
@@ -169,13 +173,17 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
   };
 
   // Delete sentence
-  const handleDelete = (id: number) => {
-    if (confirm('Are you sure you want to delete this sentence? / 이 문장을 삭제하시겠습니까?')) {
-      const filtered = sentences.filter((s) => s.id !== id);
-      onSaveSentences(filtered);
-      if (editingId === id) handleClearForm();
-      showToast('Sentence deleted.');
-    }
+  const handleDeleteClick = (id: number) => {
+    setDeleteConfirmId(id);
+  };
+
+  const handleConfirmDelete = () => {
+    if (deleteConfirmId === null) return;
+    const filtered = sentences.filter((s) => s.id !== deleteConfirmId);
+    onSaveSentences(filtered);
+    if (editingId === deleteConfirmId) handleClearForm();
+    showToast('Sentence deleted.');
+    setDeleteConfirmId(null);
   };
 
   // Reorder up
@@ -199,12 +207,11 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
   };
 
   // Reset to default
-  const handleResetToDefault = () => {
-    if (confirm('Reset to original Inside Out sentences? / 원래의 인사이드아웃 문장으로 복원하시겠습니까?')) {
-      onSaveSentences(INITIAL_SENTENCES);
-      handleClearForm();
-      showToast('Reset to default sentences.');
-    }
+  const handleConfirmResetToDefault = () => {
+    onSaveSentences(INITIAL_SENTENCES);
+    handleClearForm();
+    showToast('Reset to default sentences.');
+    setShowResetModal(false);
   };
 
   // Export JSON
@@ -219,12 +226,12 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
 
   // Import JSON
   const handleExecuteImport = () => {
+    setImportError(null);
     try {
       const parsed = JSON.parse(importJsonText);
       if (!Array.isArray(parsed)) {
         throw new Error('JSON must be an array of sentences.');
       }
-      // Basic check
       for (const item of parsed) {
         if (!item.text || typeof item.start !== 'number' || typeof item.end !== 'number') {
           throw new Error('Each sentence must have text, start, and end properties.');
@@ -235,7 +242,7 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
       setImportJsonText('');
       showToast(`Successfully imported ${parsed.length} sentences!`);
     } catch (err: any) {
-      alert(`Invalid JSON format: ${err.message || 'Please check the structure.'}`);
+      setImportError(`Invalid JSON format: ${err.message || 'Please check the structure.'}`);
     }
   };
 
@@ -537,8 +544,8 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
                     <button
-                      onClick={() => handleDelete(s.id)}
-                      className="p-1.5 text-rose-500 hover:text-rose-700 rounded-lg hover:bg-rose-50 transition-colors"
+                      onClick={() => handleDeleteClick(s.id)}
+                      className="p-1.5 text-rose-500 hover:text-rose-700 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
                       title="Delete"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -552,41 +559,145 @@ export const EditSentencesScreen: React.FC<EditSentencesScreenProps> = ({
           {/* Reset to default */}
           <div className="pt-2 text-center">
             <button
-              onClick={handleResetToDefault}
-              className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-700 py-1.5 px-3 rounded-lg hover:bg-slate-100 transition-colors"
+              onClick={() => setShowResetModal(true)}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 py-2 px-3 rounded-lg hover:bg-slate-200/60 transition-colors cursor-pointer"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
+              <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
               <span>Reset to default sentences / 기본 문장으로 복원</span>
             </button>
           </div>
         </div>
       </div>
 
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2 text-rose-600 font-bold">
+                <Trash2 className="w-5 h-5 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900">문장 삭제</h3>
+              </div>
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              선택한 문장을 정말 삭제하시겠습니까? 삭제 후에는 목록에서 제거됩니다.
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleConfirmDelete}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-bold transition-colors cursor-pointer shadow-sm"
+              >
+                삭제하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset to Default Confirmation Modal */}
+      {showResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2 text-amber-600 font-bold">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900">기본 문장 복원</h3>
+              </div>
+              <button
+                onClick={() => setShowResetModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              원래의 인사이드아웃 문장 목록으로 복원하시겠습니까? 현재 추가 또는 수정한 문장 정보가 기본 문장 목록으로 재설정됩니다.
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                onClick={() => setShowResetModal(false)}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleConfirmResetToDefault}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+              >
+                복원하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Import Modal */}
       {showImportModal && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl p-5 max-w-md w-full shadow-xl space-y-3">
-            <h3 className="text-base font-bold text-slate-900">Import Sentences JSON</h3>
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-slate-900">Import Sentences JSON</h3>
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportError(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
             <p className="text-xs text-slate-500">
               Paste a JSON array containing sentences with text, start, and end properties.
             </p>
+
+            {importError && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 leading-relaxed">
+                {importError}
+              </div>
+            )}
+
             <textarea
               value={importJsonText}
-              onChange={(e) => setImportJsonText(e.target.value)}
+              onChange={(e) => {
+                setImportJsonText(e.target.value);
+                setImportError(null);
+              }}
               placeholder='[ { "id": 1, "speaker": "Joy", "text": "...", "korean": "...", "stress": [], "start": 0, "end": 2 } ]'
               rows={8}
               className="w-full p-2.5 rounded-xl border border-slate-300 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-amber-400"
             />
+
             <div className="flex justify-end gap-2 pt-1">
               <button
-                onClick={() => setShowImportModal(false)}
-                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportError(null);
+                }}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={handleExecuteImport}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold rounded-xl shadow-xs"
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold rounded-xl shadow-xs cursor-pointer"
               >
                 Import
               </button>

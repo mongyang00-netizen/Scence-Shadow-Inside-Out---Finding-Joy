@@ -16,6 +16,15 @@ export interface SentenceProgress {
   recordings: number;
   selfCheck: [Rating, Rating, Rating];
   status: 'new' | 'practiced' | 'done';
+  practiceWords?: number[];
+}
+
+export interface PracticeSession {
+  sessionId: string;
+  sessionNumber: number;
+  startedAt: string;
+  lastActiveAt: string;
+  progress: Record<number, SentenceProgress>;
 }
 
 export type ScreenType = 'start' | 'list' | 'practice' | 'edit' | 'finish';

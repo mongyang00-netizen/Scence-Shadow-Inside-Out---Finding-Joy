@@ -24,9 +24,18 @@ export interface DiagnosticState {
   trackMuted: boolean;
   trackReadyState: string;
   trackEnabled: boolean;
+  trackSettingsSummary: string;
   chunksCount: number;
   totalBytes: number;
   speechState: string;
+  lastBlobHex: string;
+  lastBlobAscii: string;
+  lastBlobSize: number | null;
+  lastBlobMime: string;
+  lastChunkSizes: string;
+  lastRecordingDurationMs: number | null;
+  audioElementStatus: string;
+  lateCallbacksCount: number;
 }
 
 type DiagnosticListener = (logs: DiagnosticLog[], state: DiagnosticState) => void;
@@ -56,9 +65,18 @@ class AudioDiagnosticsManager {
     trackMuted: false,
     trackReadyState: 'N/A',
     trackEnabled: false,
+    trackSettingsSummary: 'N/A',
     chunksCount: 0,
     totalBytes: 0,
-    speechState: 'idle'
+    speechState: 'idle',
+    lastBlobHex: '',
+    lastBlobAscii: '',
+    lastBlobSize: null,
+    lastBlobMime: '',
+    lastChunkSizes: '[]',
+    lastRecordingDurationMs: null,
+    audioElementStatus: 'none',
+    lateCallbacksCount: 0
   };
 
   constructor() {
@@ -152,13 +170,60 @@ class AudioDiagnosticsManager {
     }
   }
 
+  public async inspectBlob(blob: Blob): Promise<{ hex: string; ascii: string; size: number; mime: string; signatureNote: string }> {
+    try {
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const sliceLen = Math.min(bytes.length, 32);
+      const hexArr: string[] = [];
+      const asciiArr: string[] = [];
+      for (let i = 0; i < sliceLen; i++) {
+        const b = bytes[i];
+        hexArr.push(b.toString(16).padStart(2, '0').toUpperCase());
+        asciiArr.push(b >= 32 && b <= 126 ? String.fromCharCode(b) : '.');
+      }
+      const hex = hexArr.join(' ');
+      const ascii = asciiArr.join('');
+
+      let signatureNote = 'Unknown audio/container format';
+      if (hex.startsWith('1A 45 DF A3')) {
+        signatureNote = 'EBML Header (WebM/Matroska container)';
+      } else if (ascii.includes('ftyp') || hex.includes('66 74 79 70')) {
+        signatureNote = 'ISO Base Media File Format (MP4 / ftyp box)';
+      } else if (hex.startsWith('52 49 46 46')) {
+        signatureNote = 'RIFF Header (WAV format)';
+      } else if (hex.startsWith('FF F1') || hex.startsWith('FF F9')) {
+        signatureNote = 'AAC ADTS syncword';
+      } else if (blob.size <= 10) {
+        signatureNote = `Tiny fragment (${blob.size} bytes - likely incomplete header or empty flush)`;
+      }
+
+      return { hex, ascii, size: blob.size, mime: blob.type || 'unknown', signatureNote };
+    } catch (e: any) {
+      return {
+        hex: 'ERROR_READING_BYTES',
+        ascii: '',
+        size: blob.size,
+        mime: blob.type || 'unknown',
+        signatureNote: `Read error: ${e?.message || e}`
+      };
+    }
+  }
+
   public getFormattedLogsText(): string {
     const stateSummary = `=== AUDIO DIAGNOSTICS LOG SUMMARY ===
 Timestamp: ${new Date().toISOString()}
 Attempts Total: ${this.currentState.attemptCounter}
 YT State: ${this.currentState.ytState} (${this.currentState.ytStateCode}) | Time: ${this.currentState.ytTime.toFixed(2)}s | Vol: ${this.currentState.ytVolume}% | Muted: ${this.currentState.ytIsMuted} | Loaded: ${(this.currentState.ytLoadedFraction * 100).toFixed(1)}% | Play Latency: ${this.currentState.timeToStartPlayingMs ?? 'N/A'}ms
 Recorder State: ${this.currentState.recState} | Track Muted: ${this.currentState.trackMuted} | Track State: ${this.currentState.trackReadyState} | Label: "${this.currentState.trackLabel}"
-Recorded Bytes: ${this.currentState.totalBytes} B (${this.currentState.chunksCount} chunks)
+Track Settings: ${this.currentState.trackSettingsSummary}
+Last Recorded Blob: ${this.currentState.lastBlobSize !== null ? `${this.currentState.lastBlobSize} B (${this.currentState.lastBlobMime})` : 'None'}
+Last Blob Hex: [${this.currentState.lastBlobHex || 'N/A'}]
+Last Blob ASCII: "${this.currentState.lastBlobAscii || 'N/A'}"
+Recorded Chunks: ${this.currentState.totalBytes} B in ${this.currentState.chunksCount} chunks | Sizes: ${this.currentState.lastChunkSizes}
+Last Rec Duration: ${this.currentState.lastRecordingDurationMs !== null ? `${this.currentState.lastRecordingDurationMs}ms` : 'N/A'}
+AudioElement Status: ${this.currentState.audioElementStatus}
+Late Callbacks / Session Mismatches: ${this.currentState.lateCallbacksCount}
 Speech Recognition State: ${this.currentState.speechState}
 AudioSession: ${this.currentState.audioSessionType} (${this.currentState.audioSessionState})
 

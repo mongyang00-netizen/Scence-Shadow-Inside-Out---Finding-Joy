@@ -15,10 +15,12 @@ import {
   Eye,
   EyeOff,
   CheckCircle,
+  Check,
   Sparkles,
   ArrowLeft,
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  Loader2
 } from 'lucide-react';
 
 interface PracticeScreenProps {
@@ -46,9 +48,9 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   onFinish,
   playerRef
 }) => {
-  // Shadowing step: 1, 2, 3, or 4
-  const [currentStep, setCurrentStep] = useState<number>(3);
-  const [isTextHidden, setIsTextHidden] = useState<boolean>(false);
+  // Shadowing step: 1, 2, 3, or 4 (Step 1 Listen is the default starting step)
+  const [currentStep, setCurrentStep] = useState<number>(1);
+  const [isTextHidden, setIsTextHidden] = useState<boolean>(true);
   const [isKoreanHidden, setIsKoreanHidden] = useState<boolean>(false);
 
   // Playback states
@@ -59,7 +61,9 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   // Recording states
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingsBySentence, setRecordingsBySentence] = useState<Record<number, string>>({});
+  const [recordingBlobsBySentence, setRecordingBlobsBySentence] = useState<Record<number, Blob>>({});
   const recordingBlobUrl = recordingsBySentence[sentence.id] || null;
+  const currentSentenceBlob = recordingBlobsBySentence[sentence.id] || null;
   const [isPlayingRecording, setIsPlayingRecording] = useState<boolean>(false);
   const [micPermissionDenied, setMicPermissionDenied] = useState<boolean>(false);
 
@@ -71,25 +75,100 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const recordingSessionIdRef = useRef<number>(0);
   const isStartingRecordingRef = useRef<boolean>(false);
 
-  // Web Speech recognition state & ref
+  // Feature toggle: Set to false to disable Check My Words UI and prevent any SpeechRecognition or mic activation
+  const SHOW_CHECK_MY_WORDS = false;
+
+  // Check My Words Mode: 'stt' (File-based recorded STT, recommended for iOS) vs 'webspeech' (Live mic Web Speech API)
+  const [checkMode, setCheckMode] = useState<'stt' | 'webspeech'>('stt');
+  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
   const [isListeningSpeech, setIsListeningSpeech] = useState<boolean>(false);
   const [speechResult, setSpeechResult] = useState<{
     transcript: string;
     matchedIndices: number[];
     totalWords: number;
+    source?: 'stt' | 'webspeech';
   } | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const speechRecognitionRef = useRef<any>(null);
+  const speechHasFinishedRef = useRef<boolean>(false);
+  const speechSilenceTimerRef = useRef<number | null>(null);
+  const speechMaxTimeoutRef = useRef<number | null>(null);
+  const speechAccumulatedTranscriptRef = useRef<string>('');
 
   const isSpeechSupported = typeof window !== 'undefined' &&
     !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
+  const clearSpeechTimers = () => {
+    if (speechSilenceTimerRef.current) {
+      window.clearTimeout(speechSilenceTimerRef.current);
+      speechSilenceTimerRef.current = null;
+    }
+    if (speechMaxTimeoutRef.current) {
+      window.clearTimeout(speechMaxTimeoutRef.current);
+      speechMaxTimeoutRef.current = null;
+    }
+  };
+
+  const finishListeningSpeech = (reason: string) => {
+    if (speechHasFinishedRef.current) {
+      audioDiagnostics.log('SPEECH', `finishListeningSpeech ignored (already finished via: ${reason})`);
+      return;
+    }
+    speechHasFinishedRef.current = true;
+    clearSpeechTimers();
+
+    audioDiagnostics.log('SPEECH', `finishListeningSpeech triggered via: ${reason}`);
+
+    if (speechRecognitionRef.current) {
+      try {
+        audioDiagnostics.log('SPEECH', 'Calling explicit recognition.stop()...');
+        speechRecognitionRef.current.stop();
+      } catch (e) {
+        audioDiagnostics.log('SPEECH', `Error calling explicit recognition.stop(): ${e}`);
+      }
+    }
+  };
+
+  // Helper function to safely & explicitly release microphone stream tracks (iOS WebKit orange dot fix)
+  const releaseStreamTracks = (streamToRelease: MediaStream | null, caller: string) => {
+    if (!streamToRelease) return;
+    try {
+      const tracks = streamToRelease.getTracks();
+      tracks.forEach((track) => {
+        const priorState = track.readyState;
+        const priorEnabled = track.enabled;
+        audioDiagnostics.log(
+          'MIC',
+          `Releasing track "${track.label}" (${caller}): readyState prior="${priorState}", enabled prior=${priorEnabled}`
+        );
+        // Explicitly set enabled = false BEFORE calling stop()
+        // Critical for iOS Safari WebKit to immediately extinguish status bar orange mic indicator.
+        track.enabled = false;
+        track.stop();
+        audioDiagnostics.log(
+          'MIC',
+          `Track "${track.label}" released (${caller}): final readyState="${track.readyState}", final enabled=${track.enabled}`
+        );
+        audioDiagnostics.updateState({
+          trackReadyState: track.readyState,
+          trackEnabled: track.enabled,
+          trackMuted: track.muted
+        });
+      });
+    } catch (err) {
+      audioDiagnostics.log('MIC', `Error in releaseStreamTracks (${caller}): ${err}`);
+    }
+  };
 
   // Clean up any active audio tracks or speech recognition on unmount
   useEffect(() => {
     return () => {
       recordingSessionIdRef.current += 1;
+      clearSpeechTimers();
+      speechHasFinishedRef.current = true;
+
       if (activeStreamRef.current) {
-        activeStreamRef.current.getTracks().forEach((track) => track.stop());
+        releaseStreamTracks(activeStreamRef.current, 'unmount');
         activeStreamRef.current = null;
       }
       if (speechRecognitionRef.current) {
@@ -106,6 +185,8 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     audioDiagnostics.log('SYS', `Switched to Sentence #${sentence.id} ("${sentence.text.substring(0, 30)}...")`);
 
     // Clean up active speech recognition
+    clearSpeechTimers();
+    speechHasFinishedRef.current = true;
     if (speechRecognitionRef.current) {
       try {
         speechRecognitionRef.current.abort();
@@ -128,9 +209,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     mediaRecorderRef.current = null;
 
     if (activeStreamRef.current) {
-      try {
-        activeStreamRef.current.getTracks().forEach((track) => track.stop());
-      } catch (e) {}
+      releaseStreamTracks(activeStreamRef.current, 'sentence-change');
       activeStreamRef.current = null;
     }
 
@@ -140,9 +219,11 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       audioElementRef.current.currentTime = 0;
     }
 
-    // 2. Reset UI, playback, and loop states for new sentence
-    const stepConfig = SHADOWING_STEPS.find((s) => s.step === currentStep);
-    setIsTextHidden(stepConfig ? stepConfig.defaultTextHidden : false);
+    // 2. Reset to Step 1 (Listen) for new sentence entry while preserving saved progress
+    setCurrentStep(1);
+    const step1Config = SHADOWING_STEPS.find((s) => s.step === 1);
+    setIsTextHidden(step1Config ? step1Config.defaultTextHidden : true);
+    setIsKoreanHidden(false);
     setIsPlayingClip(false);
     setIsRecording(false);
     setIsPlayingRecording(false);
@@ -230,11 +311,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     mediaRecorderRef.current = null;
 
     if (activeStreamRef.current) {
-      try {
-        activeStreamRef.current.getTracks().forEach((track) => track.stop());
-      } catch (e) {
-        audioDiagnostics.log('MIC', `Error stopping MediaStream tracks: ${e}`);
-      }
+      releaseStreamTracks(activeStreamRef.current, `stopRecordingProcess-${reason}`);
       activeStreamRef.current = null;
     }
 
@@ -248,15 +325,29 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
   // Start simultaneous Recording + Clip Playback with session isolation
   const handleStartRecording = async () => {
+    const attemptStartTime = performance.now();
+    const elapsed = () => `+${Math.round(performance.now() - attemptStartTime)}ms`;
     const attemptId = audioDiagnostics.incrementAttempt();
-    audioDiagnostics.log('REC', `[Attempt #${attemptId}] Record button clicked (isRecording=${isRecording}, isStarting=${isStartingRecordingRef.current})`);
+    audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Record button clicked (isRecording=${isRecording}, isStarting=${isStartingRecordingRef.current})`);
 
     // Clean up active speech recognition if user starts recording
+    clearSpeechTimers();
+    speechHasFinishedRef.current = true;
     if (speechRecognitionRef.current) {
       try {
         speechRecognitionRef.current.abort();
       } catch (e) {}
       speechRecognitionRef.current = null;
+    }
+
+    // Diagnostics: Precheck existing HTMLAudioElement from My Voice
+    if (audioElementRef.current) {
+      const el = audioElementRef.current;
+      const elStatus = `paused=${el.paused}, currentTime=${el.currentTime?.toFixed(2)}s, ended=${el.ended}, duration=${el.duration}`;
+      audioDiagnostics.log('SESSION', `[Attempt #${attemptId}] [${elapsed()}] My Voice AudioElement precheck: ${elStatus}`);
+      audioDiagnostics.updateState({ audioElementStatus: elStatus });
+    } else {
+      audioDiagnostics.updateState({ audioElementStatus: 'none' });
     }
 
     if (isRecording || isStartingRecordingRef.current) {
@@ -278,13 +369,13 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
     try {
       // 1. Microphone access requested & granted FIRST (before starting video)
-      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Requesting navigator.mediaDevices.getUserMedia({ audio: true })...`);
+      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] Calling navigator.mediaDevices.getUserMedia({ audio: true })...`);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       // If user clicked Stop or Record again while getUserMedia was pending, cancel this attempt
       if (recordingSessionIdRef.current !== currentSessionId) {
-        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Session invalidated while getUserMedia was pending. Releasing stream.`);
-        stream.getTracks().forEach((track) => track.stop());
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] Session invalidated while getUserMedia was pending. Releasing stream.`);
+        releaseStreamTracks(stream, 'invalidated-session');
         return;
       }
 
@@ -293,25 +384,27 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
 
       const audioTrack = stream.getAudioTracks()[0];
       if (audioTrack) {
+        const settings = audioTrack.getSettings ? JSON.stringify(audioTrack.getSettings()) : 'N/A';
         audioDiagnostics.updateState({
           trackLabel: audioTrack.label,
           trackMuted: audioTrack.muted,
           trackReadyState: audioTrack.readyState,
-          trackEnabled: audioTrack.enabled
+          trackEnabled: audioTrack.enabled,
+          trackSettingsSummary: settings
         });
-        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] getUserMedia success: label="${audioTrack.label}", readyState="${audioTrack.readyState}", muted=${audioTrack.muted}, enabled=${audioTrack.enabled}`);
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] getUserMedia success: label="${audioTrack.label}", readyState="${audioTrack.readyState}", muted=${audioTrack.muted}, enabled=${audioTrack.enabled}, settings=${settings}`);
 
         audioTrack.onmute = () => {
           audioDiagnostics.updateState({ trackMuted: true });
-          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONMUTE event fired (Microphone muted by browser/OS)`);
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] AudioTrack ONMUTE event fired! (Microphone muted by iOS/system)`);
         };
         audioTrack.onunmute = () => {
           audioDiagnostics.updateState({ trackMuted: false });
-          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONUNMUTE event fired`);
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] AudioTrack ONUNMUTE event fired.`);
         };
         audioTrack.onended = () => {
           audioDiagnostics.updateState({ trackReadyState: 'ended' });
-          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] AudioTrack ONENDED event fired (Microphone stream closed)`);
+          audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] AudioTrack ONENDED event fired! (Microphone stream closed unexpectedly)`);
           if (recordingSessionIdRef.current === currentSessionId && mediaRecorderRef.current?.state === 'recording') {
             try {
               mediaRecorderRef.current.stop();
@@ -319,7 +412,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
           }
         };
       } else {
-        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] WARNING: Stream returned no audio tracks!`);
+        audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] WARNING: Stream returned no audio tracks!`);
       }
 
       // Determine optimal audio mime type
@@ -327,72 +420,117 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       const supportedType = mimeTypes.find(
         (type) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)
       );
-      audioDiagnostics.log('REC', `[Attempt #${attemptId}] Selected MediaRecorder mimeType: "${supportedType || 'browser default'}"`);
+      audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Selected MediaRecorder mimeType: "${supportedType || 'browser default'}"`);
       const recorderOptions: MediaRecorderOptions = supportedType ? { mimeType: supportedType } : {};
 
       // 2. Create MediaRecorder instance
       const recorder = new MediaRecorder(stream, recorderOptions);
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
+      const chunkSizesHistory: number[] = [];
+      let recorderStartTimestamp = 0;
 
       recorder.ondataavailable = (event) => {
-        if (recordingSessionIdRef.current === currentSessionId && event.data && event.data.size > 0) {
+        const chunkSize = event.data ? event.data.size : 0;
+        const isCurrentSession = recordingSessionIdRef.current === currentSessionId;
+
+        if (!isCurrentSession) {
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] [SESSION_MISMATCH] ondataavailable chunk (${chunkSize} B) ignored! Session #${currentSessionId} expired (active is #${recordingSessionIdRef.current})`);
+          return;
+        }
+
+        if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+          chunkSizesHistory.push(event.data.size);
           const totalBytes = audioChunksRef.current.reduce((acc, chunk) => acc + chunk.size, 0);
+          const chunksStr = `[${chunkSizesHistory.map((s) => `${s}B`).join(', ')}]`;
+
           audioDiagnostics.updateState({
             chunksCount: audioChunksRef.current.length,
-            totalBytes
+            totalBytes,
+            lastChunkSizes: chunksStr
           });
-          if (audioChunksRef.current.length === 1 || audioChunksRef.current.length % 10 === 0) {
-            audioDiagnostics.log('REC', `[Attempt #${attemptId}] ondataavailable: chunk #${audioChunksRef.current.length} (${event.data.size} B), total=${totalBytes} B`);
+
+          // Log all initial chunks up to 5, and then every 10th
+          if (audioChunksRef.current.length <= 5 || audioChunksRef.current.length % 10 === 0) {
+            const trackStatus = audioTrack ? `(track: readyState="${audioTrack.readyState}", muted=${audioTrack.muted})` : '';
+            audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] ondataavailable: chunk #${audioChunksRef.current.length} = ${event.data.size} B (type="${event.data.type || 'none'}"), cumulative = ${totalBytes} B ${trackStatus}`);
           }
+        } else {
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] ondataavailable: received 0-byte or empty chunk!`);
         }
       };
 
       recorder.onerror = (errEvent: any) => {
+        const err = errEvent?.error;
+        const errName = err?.name || errEvent?.name || 'UnknownError';
+        const errMsg = err?.message || errEvent?.message || String(errEvent);
         console.warn('MediaRecorder error:', errEvent);
-        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onerror: ${errEvent?.error || errEvent?.name || errEvent}`);
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] MediaRecorder ONERROR: name="${errName}", message="${errMsg}", state="${recorder.state}"`);
         if (recordingSessionIdRef.current === currentSessionId) {
-          stopRecordingProcess(`[Attempt #${attemptId}] MediaRecorder error`);
+          stopRecordingProcess(`[Attempt #${attemptId}] MediaRecorder error: ${errName}`);
         }
       };
 
-      recorder.onstop = () => {
-        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onstop event fired`);
+      recorder.onstop = async () => {
+        const recDurationMs = Math.round(performance.now() - (recorderStartTimestamp || attemptStartTime));
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] MediaRecorder ONSTOP fired. Actual duration = ${recDurationMs}ms, state="${recorder.state}"`);
+        audioDiagnostics.updateState({ lastRecordingDurationMs: recDurationMs });
+
         if (recordingSessionIdRef.current !== currentSessionId) {
-          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Ignored onstop (session expired)`);
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Ignored onstop (session expired: current #${currentSessionId} vs active #${recordingSessionIdRef.current})`);
           return;
         }
 
         setIsRecording(false);
         isStartingRecordingRef.current = false;
 
-        // Release microphone stream tracks
-        stream.getTracks().forEach((track) => track.stop());
+        // Explicitly release microphone stream tracks using helper
+        releaseStreamTracks(stream, `onstop-attempt-${attemptId}`);
         activeStreamRef.current = null;
 
-        // Only save recording and increment count if valid audio data (> 200 bytes) was captured
         const totalBytes = audioChunksRef.current.reduce((acc, chunk) => acc + chunk.size, 0);
-        audioDiagnostics.log('REC', `[Attempt #${attemptId}] Recording finalized: Total captured bytes = ${totalBytes} B in ${audioChunksRef.current.length} chunks`);
+        const chunksSummary = `[${chunkSizesHistory.map((s) => `${s}B`).join(', ')}]`;
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Recording finalized: Total captured bytes = ${totalBytes} B across ${audioChunksRef.current.length} chunks. Chunk sizes: ${chunksSummary}`);
+
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: supportedType || 'audio/webm'
+        });
+
+        // Inspect binary payload of the recorded Blob (Hex + ASCII + Header signature)
+        const inspection = await audioDiagnostics.inspectBlob(audioBlob);
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Blob inspection: size=${inspection.size}B, mime="${inspection.mime}", note="${inspection.signatureNote}", Hex=[${inspection.hex}], ASCII="${inspection.ascii}"`);
+        audioDiagnostics.updateState({
+          lastBlobHex: inspection.hex,
+          lastBlobAscii: inspection.ascii,
+          lastBlobSize: inspection.size,
+          lastBlobMime: inspection.mime
+        });
 
         if (totalBytes > 200) {
-          const audioBlob = new Blob(audioChunksRef.current, {
-            type: supportedType || 'audio/webm'
-          });
           const url = URL.createObjectURL(audioBlob);
           setRecordingsBySentence((prev) => ({
             ...prev,
             [sentence.id]: url
           }));
+          setRecordingBlobsBySentence((prev) => ({
+            ...prev,
+            [sentence.id]: audioBlob
+          }));
+
+          // Invalidate previous STT result when a new recording is made
+          setSpeechResult(null);
+          setSpeechError(null);
 
           const nextStatus = currentStep === 4 ? 'done' : 'practiced';
           onUpdateProgress(sentence.id, {
             recordings: (progress?.recordings || 0) + 1,
             status: nextStatus
           });
-          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Recording saved successfully. Progress updated.`);
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Recording saved successfully (size=${audioBlob.size} B, type=${audioBlob.type}). Progress updated.`);
         } else {
-          audioDiagnostics.log('REC', `[Attempt #${attemptId}] WARNING: Recording yielded <200 bytes (${totalBytes} B). Recording discarded.`);
+          const failureType = totalBytes === 5 ? 'EXACT 5-BYTE CORRUPTION / HEADER-ONLY' : `UNDERSIZED (${totalBytes} B)`;
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] WARNING: Recording yielded <=200 bytes (${totalBytes} B). Classification: ${failureType}. Recording discarded.`);
           console.warn('Recording yielded insufficient audio bytes. Progress count preserved.');
         }
       };
@@ -403,25 +541,30 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         if (videoTriggered || recordingSessionIdRef.current !== currentSessionId) return;
         videoTriggered = true;
 
-        audioDiagnostics.log('REC', `[Attempt #${attemptId}] Triggering YouTube video segment play (${sentence.start}s - ${sentence.end}s)...`);
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Triggering YouTube video segment play (${sentence.start}s - ${sentence.end}s)...`);
 
         if (playerRef.current) {
           setIsPlayingClip(true);
           // Always play segment starting cleanly from sentence.start
           playerRef.current.playSegment(sentence.start, sentence.end, () => {
-            if (recordingSessionIdRef.current !== currentSessionId) return;
-            audioDiagnostics.log('REC', `[Attempt #${attemptId}] Sentence segment playback finished. Scheduling recording stop in 1.0s...`);
+            if (recordingSessionIdRef.current !== currentSessionId) {
+              audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] [LATE_CALLBACK] YouTube segment callback for Attempt #${attemptId} arrived after session invalidated!`);
+              return;
+            }
+            audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Sentence segment playback finished. Scheduling recording stop in 1.0s...`);
             setIsPlayingClip(false);
 
             // PRD rule: Recording stops exactly 1.0 second after sentence ends
             recordingStopTimeoutRef.current = window.setTimeout(() => {
               if (recordingSessionIdRef.current === currentSessionId && mediaRecorderRef.current?.state === 'recording') {
-                audioDiagnostics.log('REC', `[Attempt #${attemptId}] 1.0s post-sentence timer fired. Stopping MediaRecorder.`);
+                audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] 1.0s post-sentence timer fired. Calling MediaRecorder.stop().`);
                 try {
                   mediaRecorderRef.current.stop();
                 } catch (e) {
-                  audioDiagnostics.log('REC', `[Attempt #${attemptId}] Error stopping MediaRecorder on timer: ${e}`);
+                  audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Error stopping MediaRecorder on timer: ${e}`);
                 }
+              } else {
+                audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] 1.0s timer fired but recorder state was "${mediaRecorderRef.current?.state || 'null'}" or session changed.`);
               }
             }, 1000);
           });
@@ -429,7 +572,9 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       recorder.onstart = () => {
-        audioDiagnostics.log('REC', `[Attempt #${attemptId}] MediaRecorder onstart event fired`);
+        recorderStartTimestamp = performance.now();
+        const trackNow = audioTrack ? `track.readyState="${audioTrack.readyState}", muted=${audioTrack.muted}, enabled=${audioTrack.enabled}` : 'no track';
+        audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] MediaRecorder ONSTART event fired. State="${recorder.state}", mime="${recorder.mimeType}", ${trackNow}`);
         audioDiagnostics.updateState({ recState: 'recording' });
         if (recordingSessionIdRef.current === currentSessionId) {
           triggerVideoPlayback();
@@ -437,21 +582,21 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       // Start recording
-      audioDiagnostics.log('REC', `[Attempt #${attemptId}] Calling MediaRecorder.start(50)...`);
+      audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Calling MediaRecorder.start(50)...`);
       recorder.start(50);
       setIsRecording(true);
 
       // Safeguard fallback in case browser skips or delays onstart event
       setTimeout(() => {
         if (recordingSessionIdRef.current === currentSessionId && !videoTriggered && mediaRecorderRef.current?.state === 'recording') {
-          audioDiagnostics.log('REC', `[Attempt #${attemptId}] Safeguard fallback triggered video playback (onstart event delayed or omitted by browser)`);
+          audioDiagnostics.log('REC', `[Attempt #${attemptId}] [${elapsed()}] Safeguard fallback triggered video playback (onstart event delayed or omitted by browser)`);
           triggerVideoPlayback();
         }
       }, 50);
 
     } catch (err: any) {
       console.warn('Microphone error:', err);
-      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] Exception in handleStartRecording: ${err?.name || err} - ${err?.message || err}`);
+      audioDiagnostics.log('MIC', `[Attempt #${attemptId}] [${elapsed()}] Exception in handleStartRecording: ${err?.name || err} - ${err?.message || err}`);
       if (recordingSessionIdRef.current === currentSessionId) {
         setMicPermissionDenied(true);
         stopRecordingProcess(`[Attempt #${attemptId}] Microphone permission or access exception`);
@@ -469,27 +614,38 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
         audioElementRef.current.currentTime = 0;
       }
       setIsPlayingRecording(false);
+      audioDiagnostics.log('REC', 'Voice audio paused by user.');
+      audioDiagnostics.updateState({ audioElementStatus: 'paused by user' });
       return;
     }
 
-    audioDiagnostics.log('REC', 'Playing recorded voice audio...');
+    audioDiagnostics.log('REC', `Playing recorded voice audio (src="${recordingBlobUrl}")...`);
     const audio = new Audio(recordingBlobUrl);
     audioElementRef.current = audio;
     setIsPlayingRecording(true);
+    audioDiagnostics.updateState({ audioElementStatus: 'playing' });
+
+    audio.onplay = () => {
+      audioDiagnostics.log('REC', 'Voice audio onplay: playback started.');
+      audioDiagnostics.updateState({ audioElementStatus: 'playing' });
+    };
 
     audio.onended = () => {
-      audioDiagnostics.log('REC', 'Voice audio playback ended.');
+      audioDiagnostics.log('REC', 'Voice audio onended: playback finished cleanly.');
+      audioDiagnostics.updateState({ audioElementStatus: 'ended (clean)' });
       setIsPlayingRecording(false);
     };
 
     audio.onerror = (e) => {
-      audioDiagnostics.log('REC', `Voice audio playback error: ${e}`);
+      audioDiagnostics.log('REC', `Voice audio onerror: ${e}`);
+      audioDiagnostics.updateState({ audioElementStatus: 'error' });
       setIsPlayingRecording(false);
     };
 
     audio.play().catch((err) => {
       console.warn('Playback error:', err);
       audioDiagnostics.log('REC', `Voice audio play() rejected: ${err}`);
+      audioDiagnostics.updateState({ audioElementStatus: `play rejected: ${err}` });
       setIsPlayingRecording(false);
     });
   };
@@ -503,9 +659,122 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     });
   };
 
-  // Web Speech recognition (Check My Words) with exhaustive lifecycle event logging & session isolation
-  const handleCheckWords = () => {
-    audioDiagnostics.log('SPEECH', 'Check My Words button clicked');
+  // Words to practice (Self-assessment: learner chooses words to practice more)
+  const handleToggleWordToPractice = (idx: number) => {
+    const current = progress?.practiceWords || [];
+    const updated = current.includes(idx)
+      ? current.filter((i) => i !== idx)
+      : [...current, idx].sort((a, b) => a - b);
+    onUpdateProgress(sentence.id, {
+      practiceWords: updated
+    });
+  };
+
+  // Helper to evaluate words against target sentence
+  const evaluateTranscriptAgainstSentence = (rawTranscript: string, source: 'stt' | 'webspeech') => {
+    const cleanTranscript = (rawTranscript || '').trim();
+    if (!cleanTranscript) {
+      setSpeechError('Could not catch speech from audio. Please speak clearly into the mic!');
+      return;
+    }
+
+    const targetWords = sentence.text.split(/\s+/).map((w) =>
+      w.toLowerCase().replace(/[^a-z0-9']/g, '')
+    );
+    const spokenWords = cleanTranscript.split(/\s+/).map((w: string) =>
+      w.toLowerCase().replace(/[^a-z0-9']/g, '')
+    );
+
+    const matchedIndices: number[] = [];
+    targetWords.forEach((word, idx) => {
+      if (word && spokenWords.includes(word)) {
+        matchedIndices.push(idx);
+      }
+    });
+
+    setSpeechResult({
+      transcript: cleanTranscript,
+      matchedIndices,
+      totalWords: targetWords.filter((w) => w.length > 0).length,
+      source
+    });
+    audioDiagnostics.log('SPEECH', `[${source.toUpperCase()}] Evaluated: matched ${matchedIndices.length} / ${targetWords.length} words`);
+  };
+
+  // Helper to convert audio Blob to base64
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string;
+        // strip data url prefix e.g. "data:audio/webm;base64,"
+        const base64 = result.includes(',') ? result.split(',')[1] : result;
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  // 1. File-based STT using recorded audio Blob (No mic activation, solves iOS Safari mic lockup)
+  const handleCheckWordsWithSTT = async () => {
+    audioDiagnostics.log('SPEECH', 'Check My Words (STT mode) clicked');
+    setSpeechError(null);
+
+    if (!currentSentenceBlob || currentSentenceBlob.size < 200) {
+      setSpeechError('Please record your voice first using the Record button above! / 먼저 위 Record 버튼으로 녹음해 주세요.');
+      return;
+    }
+
+    setIsTranscribing(true);
+    setSpeechResult(null);
+
+    try {
+      const base64Audio = await blobToBase64(currentSentenceBlob);
+      const mimeType = currentSentenceBlob.type || 'audio/webm';
+      audioDiagnostics.log('SPEECH', `Sending audio blob to /api/transcribe (size=${currentSentenceBlob.size} B, mimeType="${mimeType}")`);
+
+      const response = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          audioBase64: base64Audio,
+          mimeType,
+          sentenceText: sentence.text,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        if (data.error === 'GEMINI_API_KEY_NOT_CONFIGURED') {
+          throw new Error('Server GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY in environment variables.');
+        }
+        throw new Error(data.message || `Server transcription failed (${response.status})`);
+      }
+
+      const transcribedText = data.transcript || '';
+      audioDiagnostics.log('SPEECH', `STT transcription received: "${transcribedText}"`);
+
+      if (!transcribedText.trim()) {
+        setSpeechError('No speech was detected in your recording. Please try recording again speaking clearly! / 녹음에서 목소리가 감지되지 않았습니다.');
+      } else {
+        evaluateTranscriptAgainstSentence(transcribedText, 'stt');
+      }
+    } catch (err: any) {
+      console.warn('STT transcription error:', err);
+      audioDiagnostics.log('SPEECH', `STT error: ${err?.message || err}`);
+      setSpeechError(`STT Error: ${err?.message || 'Failed to transcribe recording'}`);
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  // 2. Original live mic Web Speech recognition (Preserved 100% for rollback or direct comparison)
+  const handleCheckWordsLive = () => {
+    audioDiagnostics.log('SPEECH', 'Check My Words live mic clicked (Web Speech API)');
 
     if (!isSpeechSupported) {
       audioDiagnostics.log('SPEECH', 'Web Speech API is not supported on this browser');
@@ -516,7 +785,12 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     // 1. Completely stop and release any active MediaRecorder or getUserMedia stream tracks FIRST
     stopRecordingProcess('Clearing active MediaRecorder/stream before starting Speech Recognition');
 
-    // 2. Abort any existing SpeechRecognition instance
+    // 2. Clear previous speech timers & reset termination guards
+    clearSpeechTimers();
+    speechHasFinishedRef.current = false;
+    speechAccumulatedTranscriptRef.current = '';
+
+    // 3. Abort any un-ended SpeechRecognition instance from a previous run
     if (speechRecognitionRef.current) {
       try {
         speechRecognitionRef.current.abort();
@@ -530,9 +804,10 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       const recognition = new SpeechRecognition();
       speechRecognitionRef.current = recognition;
 
+      // Mode B proven pattern for iOS WebKit & Android: continuous=true & interimResults=true
       recognition.lang = 'en-US';
-      recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.continuous = true;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       setIsListeningSpeech(true);
@@ -540,7 +815,13 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       setSpeechResult(null);
       audioDiagnostics.updateState({ speechState: 'initializing' });
 
-      // Comprehensive WebSpeech API event lifecycle diagnostics for iOS WebKit
+      // Mode B initial 8.0s max timeout safeguard (if user makes no sound after tapping)
+      speechMaxTimeoutRef.current = window.setTimeout(() => {
+        audioDiagnostics.log('SPEECH', '8.0s initial max timeout fired (no sound detected)');
+        finishListeningSpeech('8.0s initial max timeout');
+      }, 8000);
+
+      // Comprehensive WebSpeech API event lifecycle diagnostics
       recognition.onstart = () => {
         audioDiagnostics.log('SPEECH', 'onstart: SpeechRecognition engine started');
         setIsListeningSpeech(true);
@@ -548,19 +829,19 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       recognition.onaudiostart = () => {
-        audioDiagnostics.log('SPEECH', 'onaudiostart: Audio capture started by SpeechRecognition');
+        audioDiagnostics.log('SPEECH', 'onaudiostart: Audio capture stream opened by SpeechRecognition');
       };
 
       recognition.onsoundstart = () => {
-        audioDiagnostics.log('SPEECH', 'onsoundstart: Sound input detected by SpeechRecognition');
+        audioDiagnostics.log('SPEECH', 'onsoundstart: Sound input detected');
       };
 
       recognition.onspeechstart = () => {
-        audioDiagnostics.log('SPEECH', 'onspeechstart: Speech detected');
+        audioDiagnostics.log('SPEECH', 'onspeechstart: Speech pattern detected');
       };
 
       recognition.onspeechend = () => {
-        audioDiagnostics.log('SPEECH', 'onspeechend: Speech input ended');
+        audioDiagnostics.log('SPEECH', 'onspeechend: Speech pattern ended');
       };
 
       recognition.onsoundend = () => {
@@ -568,46 +849,46 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       recognition.onaudioend = () => {
-        audioDiagnostics.log('SPEECH', 'onaudioend: Audio capture ended');
+        audioDiagnostics.log('SPEECH', 'onaudioend: Audio capture stream ended by browser engine');
       };
 
       recognition.onresult = (event: any) => {
-        const transcript = event.results?.[0]?.[0]?.transcript || '';
-        const confidence = event.results?.[0]?.[0]?.confidence ?? 0;
-        audioDiagnostics.log('SPEECH', `onresult: transcript="${transcript}" (confidence=${(confidence * 100).toFixed(0)}%)`);
-        setIsListeningSpeech(false);
+        let interimText = '';
+        let finalText = '';
 
-        if (!transcript || transcript.trim().length === 0) {
-          setSpeechError('Could not catch your voice clearly. Please try speaking into the mic again!');
-          return;
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          const text = res[0]?.transcript || '';
+          if (res.isFinal) {
+            finalText += text;
+          } else {
+            interimText += text;
+          }
         }
 
-        // Normalize words and compare
-        const targetWords = sentence.text.split(/\s+/).map((w) =>
-          w.toLowerCase().replace(/[^a-z0-9']/g, '')
-        );
-        const spokenWords = transcript.split(/\s+/).map((w: string) =>
-          w.toLowerCase().replace(/[^a-z0-9']/g, '')
-        );
+        const currentCaptured = (finalText || interimText || '').trim();
+        if (currentCaptured) {
+          speechAccumulatedTranscriptRef.current = currentCaptured;
+          audioDiagnostics.log('SPEECH', `onresult: currentTranscript="${currentCaptured}" (isFinal=${!!finalText})`);
 
-        const matchedIndices: number[] = [];
-        targetWords.forEach((word, idx) => {
-          if (word && spokenWords.includes(word)) {
-            matchedIndices.push(idx);
+          // Reset 1.5s silence timer on every speech result in Mode B
+          if (speechSilenceTimerRef.current) {
+            window.clearTimeout(speechSilenceTimerRef.current);
           }
-        });
-
-        setSpeechResult({
-          transcript,
-          matchedIndices,
-          totalWords: targetWords.filter((w) => w.length > 0).length
-        });
+          speechSilenceTimerRef.current = window.setTimeout(() => {
+            audioDiagnostics.log('SPEECH', '1.5s silence timer fired after last spoken word');
+            finishListeningSpeech('1.5s silence timeout');
+          }, 1500);
+        }
       };
 
       recognition.onerror = (e: any) => {
         const errType = e?.error || 'unknown';
         const errMessage = e?.message || '';
         audioDiagnostics.log('SPEECH', `onerror: error="${errType}", message="${errMessage}"`);
+
+        speechHasFinishedRef.current = true;
+        clearSpeechTimers();
         setIsListeningSpeech(false);
         audioDiagnostics.updateState({ speechState: `error:${errType}` });
 
@@ -627,17 +908,23 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
       };
 
       recognition.onend = () => {
-        audioDiagnostics.log('SPEECH', 'onend: SpeechRecognition session closed');
+        audioDiagnostics.log('SPEECH', 'onend: SpeechRecognition session closed. Evaluating target word match...');
+        speechHasFinishedRef.current = true;
+        clearSpeechTimers();
         setIsListeningSpeech(false);
         audioDiagnostics.updateState({ speechState: 'idle' });
         speechRecognitionRef.current = null;
+
+        evaluateTranscriptAgainstSentence(speechAccumulatedTranscriptRef.current, 'webspeech');
       };
 
-      audioDiagnostics.log('SPEECH', 'Calling recognition.start()...');
+      audioDiagnostics.log('SPEECH', 'Calling recognition.start() in Mode B...');
       recognition.start();
     } catch (err: any) {
       console.warn('Recognition start error:', err);
       audioDiagnostics.log('SPEECH', `Exception starting SpeechRecognition: ${err?.name || err} - ${err?.message || err}`);
+      speechHasFinishedRef.current = true;
+      clearSpeechTimers();
       setIsListeningSpeech(false);
       audioDiagnostics.updateState({ speechState: 'error' });
       setSpeechError('Speech recognition was unavailable. Please try again.');
@@ -979,81 +1266,79 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
           )}
         </div>
 
-        {/* Word Check (Web Speech API) */}
-        {isSpeechSupported && (
-          <div className="bg-white rounded-2xl p-4 shadow-xs border border-slate-200 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
-                <Sparkles className="w-4 h-4 text-sky-500" />
-                <span>Word Check / 단어 일치 확인</span>
-              </div>
-              <button
-                onClick={handleCheckWords}
-                disabled={isListeningSpeech}
-                className="px-3 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <Mic className="w-3.5 h-3.5 text-sky-600" />
-                <span>{isListeningSpeech ? 'Listening...' : 'Check My Words'}</span>
-              </button>
+        {/* Words to Practice / 추가 연습 단어 (Learner self-assessment) */}
+        <div className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 space-y-3.5">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-amber-500" />
+              <span className="text-sm font-bold text-slate-900">
+                Words to Practice / 추가 연습 단어
+              </span>
             </div>
-
-            {isListeningSpeech && (
-              <div className="p-3 bg-sky-50 rounded-xl border border-sky-100 text-center space-y-1 animate-pulse">
-                <p className="text-xs font-semibold text-sky-900">
-                  Speak this sentence out loud into your mic now!
-                </p>
-                <p className="text-[11px] text-sky-700">마이크에 대고 영어 문장을 또박또박 말해보세요.</p>
-              </div>
-            )}
-
-            {speechError && (
-              <div className="p-2.5 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
-                {speechError}
-              </div>
-            )}
-
-            {speechResult && (
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                <div className="text-xs font-medium text-slate-500">
-                  Pronunciation match:
-                </div>
-                {/* Word matching display */}
-                <div className="text-base font-semibold leading-relaxed flex flex-wrap gap-1.5">
-                  {sentenceWords.map((word, idx) => {
-                    const isMatched = speechResult.matchedIndices.includes(idx);
-                    return isMatched ? (
-                      <span
-                        key={idx}
-                        className="text-emerald-700 bg-emerald-100/80 px-1.5 py-0.5 rounded font-bold"
-                      >
-                        {word}
-                      </span>
-                    ) : (
-                      <span
-                        key={idx}
-                        className="text-slate-400 underline decoration-slate-400 decoration-2 underline-offset-4 px-1"
-                      >
-                        {word}
-                      </span>
-                    );
-                  })}
-                </div>
-
-                <div className="text-xs font-semibold text-slate-700 pt-1 border-t border-slate-200 flex items-center justify-between">
-                  <span>
-                    You said <strong className="text-emerald-700">{speechResult.matchedIndices.length}</strong> of{' '}
-                    <strong>{speechResult.totalWords}</strong> words.
-                  </span>
-                  <span className="text-[11px] text-slate-500">
-                    {speechResult.matchedIndices.length >= Math.ceil(speechResult.totalWords * 0.7)
-                      ? 'Awesome rhythm!'
-                      : 'Good effort! Keep shadowing!'}
-                  </span>
-                </div>
-              </div>
+            {(progress?.practiceWords && progress.practiceWords.length > 0) ? (
+              <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-950 border border-amber-300">
+                {progress.practiceWords.length}개 선택됨
+              </span>
+            ) : (
+              <span className="text-[11px] text-slate-400 font-medium">선택형 자기 점검</span>
             )}
           </div>
-        )}
+
+          {/* Instructions */}
+          <div className="space-y-0.5">
+            <p className="text-xs font-semibold text-slate-700">
+              Listen to your recording and select the words you want to practice more.
+            </p>
+            <p className="text-[11px] text-slate-400">
+              내 녹음을 듣고 더 연습하고 싶은 단어를 선택해 보세요.
+            </p>
+          </div>
+
+          {/* Word Chips */}
+          <div className="flex flex-wrap gap-2 pt-1">
+            {sentenceWords.map((word, idx) => {
+              const isSelected = (progress?.practiceWords || []).includes(idx);
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => handleToggleWordToPractice(idx)}
+                  className={`min-h-[38px] px-3 py-1.5 rounded-xl text-sm transition-all cursor-pointer flex items-center gap-1.5 border select-none active:scale-95 ${
+                    isSelected
+                      ? 'bg-amber-100/95 text-amber-950 border-amber-400 font-bold shadow-xs ring-1 ring-amber-400/40'
+                      : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 hover:border-slate-300 font-medium'
+                  }`}
+                  title={isSelected ? '선택 해제' : '추가 연습 단어로 선택'}
+                >
+                  <span>{word}</span>
+                  {isSelected && (
+                    <Check className="w-3.5 h-3.5 text-amber-700 stroke-[2.5]" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Footer guidance / Clear all */}
+          {(progress?.practiceWords && progress.practiceWords.length > 0) ? (
+            <div className="flex items-center justify-between pt-1 border-t border-slate-100 text-[11px]">
+              <span className="text-slate-500">
+                선택한 단어는 Finish 화면에 정리되어 다시 연습할 수 있습니다.
+              </span>
+              <button
+                type="button"
+                onClick={() => onUpdateProgress(sentence.id, { practiceWords: [] })}
+                className="text-slate-400 hover:text-slate-600 underline cursor-pointer shrink-0 ml-2"
+              >
+                선택 초기화
+              </button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400 pt-0.5">
+              ※ 단어를 누르면 선택/해제됩니다. 자신 있게 발화한 문장이라면 선택하지 않고 넘어가도 좋습니다.
+            </p>
+          )}
+        </div>
 
         {/* Self-Check Questions (😀 / 🙂 / 😐) */}
         <div className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 space-y-3.5">

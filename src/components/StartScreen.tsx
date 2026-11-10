@@ -1,17 +1,32 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { EducationalNoticeCard } from './EducationalNoticeCard';
-import { Play, Sparkles, BookOpen, Settings2, Headphones, Mic, Volume2 } from 'lucide-react';
-import { MOVIE_SETTINGS } from '../constants';
+import { Play, Sparkles, BookOpen, Settings2, Headphones, Mic, Volume2, RotateCcw, AlertTriangle, X } from 'lucide-react';
 
 interface StartScreenProps {
-  onStart: () => void;
+  onContinue: () => void;
+  onStartNew: () => void;
+  hasExistingProgress: boolean;
+  completedCount: number;
+  totalRecordingsCount: number;
+  sessionNumber?: number;
   onEdit: () => void;
   sentenceCount: number;
 }
 
-export const StartScreen: React.FC<StartScreenProps> = ({ onStart, onEdit, sentenceCount }) => {
+export const StartScreen: React.FC<StartScreenProps> = ({
+  onContinue,
+  onStartNew,
+  hasExistingProgress,
+  completedCount,
+  totalRecordingsCount,
+  sessionNumber,
+  onEdit,
+  sentenceCount
+}) => {
+  const [showConfirmNew, setShowConfirmNew] = useState(false);
+
   return (
-    <div className="flex flex-col min-h-screen px-4 py-6 max-w-lg mx-auto space-y-6">
+    <div className="flex flex-col min-h-screen px-4 py-6 max-w-lg mx-auto space-y-6 relative">
       {/* Hero Header */}
       <div className="text-center pt-2 space-y-3">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100 text-amber-900 border border-amber-200 text-xs font-semibold">
@@ -35,7 +50,14 @@ export const StartScreen: React.FC<StartScreenProps> = ({ onStart, onEdit, sente
       {/* Visual character theme banner */}
       <div className="bg-gradient-to-r from-amber-400 via-amber-300 to-sky-300 p-4 rounded-2xl shadow-sm border border-amber-200/60 text-slate-900">
         <div className="space-y-1 [word-break:keep-all] break-words">
-          <span className="text-xs uppercase font-bold tracking-wider text-amber-900">Movie Clip Practice</span>
+          <div className="flex items-center justify-between">
+            <span className="text-xs uppercase font-bold tracking-wider text-amber-900">Movie Clip Practice</span>
+            {hasExistingProgress && sessionNumber && (
+              <span className="bg-amber-900/10 text-amber-950 font-bold text-[11px] px-2 py-0.5 rounded-full">
+                Session #{sessionNumber}
+              </span>
+            )}
+          </div>
           <h2 className="text-lg font-bold text-slate-900">슬픔이와 기쁨이의 대화</h2>
           <p className="text-xs text-slate-700">{sentenceCount} Curated Everyday Phrases · Movie Clip</p>
         </div>
@@ -89,16 +111,43 @@ export const StartScreen: React.FC<StartScreenProps> = ({ onStart, onEdit, sente
 
       {/* CTA Buttons */}
       <div className="space-y-3 pt-2">
-        <button
-          onClick={onStart}
-          className="w-full min-h-[54px] px-6 py-3.5 bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-700 active:scale-[0.98] text-slate-950 font-bold rounded-2xl shadow-md shadow-amber-500/20 flex flex-col items-center justify-center transition-all cursor-pointer"
-        >
-          <div className="flex items-center gap-2 text-lg">
-            <Play className="w-5 h-5 fill-current" />
-            <span>Start Practice</span>
+        {hasExistingProgress ? (
+          <div className="space-y-2.5">
+            {/* Continue Practice Button */}
+            <button
+              onClick={onContinue}
+              className="w-full min-h-[56px] px-6 py-3.5 bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-700 active:scale-[0.98] text-slate-950 font-bold rounded-2xl shadow-md shadow-amber-500/20 flex flex-col items-center justify-center transition-all cursor-pointer"
+            >
+              <div className="flex items-center gap-2 text-lg">
+                <Play className="w-5 h-5 fill-current" />
+                <span>Continue Practice</span>
+              </div>
+              <span className="text-xs font-semibold text-amber-950/80">
+                이전 학습 이어하기 (완료 {completedCount}/{sentenceCount}문장 · 녹음 {totalRecordingsCount}회)
+              </span>
+            </button>
+
+            {/* Start New Practice Button */}
+            <button
+              onClick={() => setShowConfirmNew(true)}
+              className="w-full min-h-[50px] px-5 py-2.5 bg-white hover:bg-slate-50 active:scale-[0.98] text-slate-800 font-bold rounded-2xl border border-slate-300 shadow-xs flex items-center justify-center gap-2 transition-all cursor-pointer text-sm"
+            >
+              <RotateCcw className="w-4 h-4 text-slate-600" />
+              <span>Start New Practice / 새로운 회차 시작</span>
+            </button>
           </div>
-          <span className="text-xs font-semibold text-amber-950/80">연습 시작 ({sentenceCount}개 문장)</span>
-        </button>
+        ) : (
+          <button
+            onClick={onContinue}
+            className="w-full min-h-[54px] px-6 py-3.5 bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-700 active:scale-[0.98] text-slate-950 font-bold rounded-2xl shadow-md shadow-amber-500/20 flex flex-col items-center justify-center transition-all cursor-pointer"
+          >
+            <div className="flex items-center gap-2 text-lg">
+              <Play className="w-5 h-5 fill-current" />
+              <span>Start Practice</span>
+            </div>
+            <span className="text-xs font-semibold text-amber-950/80">연습 시작 ({sentenceCount}개 문장)</span>
+          </button>
+        )}
 
         <div className="text-center pt-1">
           <button
@@ -115,6 +164,54 @@ export const StartScreen: React.FC<StartScreenProps> = ({ onStart, onEdit, sente
       <div className="pt-2">
         <EducationalNoticeCard />
       </div>
+
+      {/* Confirmation Modal for Start New Practice */}
+      {showConfirmNew && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2 text-amber-600">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900">새로운 회차를 시작할까요?</h3>
+              </div>
+              <button
+                onClick={() => setShowConfirmNew(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-600 space-y-2 leading-relaxed">
+              <p>
+                현재 진행 중인 학습 기록(<strong className="text-slate-800">완료 {completedCount}문장</strong>,{' '}
+                <strong className="text-slate-800">총 녹음 {totalRecordingsCount}회</strong>, 자가 평가 결과)이 초기화되고, 1번 문장부터 새로운 회차가 시작됩니다.
+              </p>
+              <p className="text-slate-400 text-[11px] bg-slate-50 p-2.5 rounded-xl border border-slate-200/60">
+                ※ 편집한 문장 내용, 한국어 번역, 강조 단어, 유튜브 영상 구간 정보는 안전하게 유지됩니다.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                onClick={() => setShowConfirmNew(false)}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                취소 (계속 유지)
+              </button>
+              <button
+                onClick={() => {
+                  setShowConfirmNew(false);
+                  onStartNew();
+                }}
+                className="flex-1 py-2.5 px-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold transition-colors cursor-pointer shadow-sm"
+              >
+                새로 시작하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
